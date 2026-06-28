@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PZ Server Manager</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0 }
+:root {
+  --bg: #0d0d1a;
+  --bg2: #13132b;
+  --bg3: #1a1a3a;
+  --border: #2a2a5a;
+  --accent: #e94560;
+  --accent2: #4a9eff;
+  --text: #e0e0f0;
+  --muted: #6a6a9a;
+  --success: #22c55e;
+  --danger: #ef4444;
+  --warn: #f59e0b;
+}
+body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px }
+a { color: var(--accent2); text-decoration: none }
+a:hover { text-decoration: underline }
+
+/* Header */
+header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: .75rem 1.5rem; display: flex; align-items: center; gap: 1rem; position: sticky; top: 0; z-index: 10 }
+.logo { font-size: 1rem; font-weight: 700; color: var(--accent); letter-spacing: .03em; white-space: nowrap }
+#status-badge { font-size: .75rem; padding: .2rem .6rem; border-radius: 999px; font-weight: 600; white-space: nowrap }
+.badge-running { background: #14532d; color: #4ade80 }
+.badge-stopped, .badge-exited { background: #450a0a; color: #fca5a5 }
+.badge-unknown { background: #27272a; color: #a1a1aa }
+nav { display: flex; gap: .25rem; margin-left: auto }
+.tab-btn { padding: .4rem .9rem; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; font-size: .85rem; font-weight: 500; transition: all .15s }
+.tab-btn:hover { color: var(--text); background: var(--bg3) }
+.tab-btn.active { color: var(--text); background: var(--bg3); border-color: var(--border) }
+
+/* Layout */
+main { max-width: 1100px; margin: 1.5rem auto; padding: 0 1rem }
+.tab-pane { display: none }
+.tab-pane.active { display: block }
+
+/* Cards */
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin-bottom: 1.25rem }
+.card-title { font-size: .75rem; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 1rem }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem }
+@media (max-width: 640px) { .grid2 { grid-template-columns: 1fr } }
+
+/* Buttons */
+button { padding: .45rem 1rem; border: none; border-radius: 6px; font-size: .85rem; cursor: pointer; font-weight: 600; transition: opacity .15s; display: inline-flex; align-items: center; gap: .4rem }
+button:hover { opacity: .85 }
+button:disabled { opacity: .35; cursor: not-allowed }
+.btn-primary { background: var(--accent); color: #fff }
+.btn-secondary { background: var(--bg3); color: var(--accent2); border: 1px solid var(--border) }
+.btn-success { background: #14532d; color: #4ade80; border: 1px solid #166534 }
+.btn-danger { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d }
+.btn-warn { background: #451a03; color: #fcd34d; border: 1px solid #78350f }
+.btn-sm { font-size: .78rem; padding: .3rem .65rem }
+
+/* Inputs */
+input, select { padding: .45rem .75rem; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: .85rem }
+input:focus, select:focus { outline: 2px solid var(--accent); border-color: transparent }
+input::placeholder { color: var(--muted) }
+select option { background: var(--bg2) }
+.row { display: flex; gap: .6rem; align-items: center }
+.row input, .row select { flex: 1 }
+
+/* Messages */
+.msg { padding: .65rem 1rem; border-radius: 6px; margin-bottom: .75rem; font-size: .85rem }
+.msg-success { background: #14532d33; color: #4ade80; border: 1px solid #166534 }
+.msg-error { background: #450a0a33; color: #fca5a5; border: 1px solid #7f1d1d }
+.msg-info { background: #1e3a5f33; color: #93c5fd; border: 1px solid #1e40af }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; font-size: .85rem }
+th { text-align: left; padding: .5rem .75rem; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border) }
+td { padding: .55rem .75rem; border-bottom: 1px solid var(--border); vertical-align: middle }
+tr:last-child td { border-bottom: none }
+tr:hover td { background: var(--bg3) }
+.mono { font-family: monospace; font-size: .8rem }
+.badge { display: inline-block; font-size: .7rem; padding: .15rem .45rem; border-radius: 4px; font-weight: 600 }
+.badge-admin { background: #78350f; color: #fcd34d }
+.badge-moderator { background: #1e3a5f; color: #93c5fd }
+.badge-gm { background: #1a2e1a; color: #86efac }
+.badge-overseer { background: #2a1a3a; color: #c4b5fd }
+.badge-observer { background: #1a1a2e; color: #a1a1aa }
+.badge-none, .badge-null { background: #27272a; color: #71717a }
+.badge-banned { background: #450a0a; color: #fca5a5 }
+.text-muted { color: var(--muted) }
+.actions { display: flex; gap: .4rem; flex-wrap: wrap }
+
+/* Dashboard stats */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; margin-bottom: 1.25rem }
+.stat { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center }
+.stat-value { font-size: 1.5rem; font-weight: 700; color: var(--accent2) }
+.stat-label { font-size: .75rem; color: var(--muted); margin-top: .2rem }
+.control-row { display: flex; gap: .75rem; flex-wrap: wrap }
+
+/* Logs */
+#log-output {
+  background: #070710;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  height: 60vh;
+  overflow-y: auto;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: .78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.log-line { padding: .05rem 0 }
+.log-ts { color: #4a4a7a; margin-right: .5rem }
+.log-warn { color: #fcd34d }
+.log-error { color: #fca5a5 }
+.log-info { color: #93c5fd }
+.log-default { color: #a0a0c0 }
+.log-controls { display: flex; gap: .6rem; align-items: center; margin-bottom: .75rem; flex-wrap: wrap }
+.log-controls input { width: 200px }
+#log-count { color: var(--muted); font-size: .8rem; margin-left: auto }
+
+/* Spinner */
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,.2); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite }
+@keyframes spin { to { transform: rotate(360deg) } }
+
+/* Empty state */
+.empty { color: var(--muted); text-align: center; padding: 2.5rem 1rem; font-style: italic }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">PZ Server Manager</div>
+  <span id="status-badge" class="badge-unknown">checking...</span>
+  <nav>
+    <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
+    <button class="tab-btn" onclick="switchTab('mods')">Mods</button>
+    <button class="tab-btn" onclick="switchTab('players')">Players</button>
+    <button class="tab-btn" onclick="switchTab('logs')">Logs</button>
+    <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
+  </nav>
+</header>
+
+<main>
+  <!-- DASHBOARD -->
+  <div id="tab-dashboard" class="tab-pane active">
+    <div id="dash-msg"></div>
+    <div class="card">
+      <div class="card-title">Server Control</div>
+      <div class="stat-grid">
+        <div class="stat"><div class="stat-value" id="dash-status">—</div><div class="stat-label">Status</div></div>
+        <div class="stat"><div class="stat-value" id="dash-uptime">—</div><div class="stat-label">Started</div></div>
+        <div class="stat"><div class="stat-value" id="dash-players">—</div><div class="stat-label">Accounts</div></div>
+        <div class="stat"><div class="stat-value" id="dash-mods">—</div><div class="stat-label">Mods</div></div>
+        <div class="stat"><div class="stat-value" id="dash-cpu" style="font-size:1.1rem">—</div><div class="stat-label">CPU</div></div>
+        <div class="stat"><div class="stat-value" id="dash-mem" style="font-size:1.1rem">—</div><div class="stat-label">Memory</div></div>
+        <div class="stat"><div class="stat-value" id="dash-disk" style="font-size:1.1rem">—</div><div class="stat-label">Disk Used</div></div>
+      </div>
+      <div class="control-row">
+        <button class="btn-success" id="btn-start" onclick="serverAction('start')">Start</button>
+        <button class="btn-danger" id="btn-stop" onclick="serverAction('stop')">Stop</button>
+        <button class="btn-warn" id="btn-restart" onclick="serverAction('restart')">Restart</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Connection Info</div>
+      <table>
+        <tr><td class="text-muted" style="width:140px">LAN</td><td class="mono">192.168.1.20:16261</td></tr>
+        <tr><td class="text-muted">Game Port</td><td class="mono">UDP 16261 / 16262</td></tr>
+        <tr><td class="text-muted">Steam Query</td><td class="mono">TCP 27015</td></tr>
+        <tr><td class="text-muted">Server Name</td><td class="mono">servertest</td></tr>
+        <tr><td class="text-muted">Image</td><td class="mono">danixu86/project-zomboid-dedicated-server:latest</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- MODS -->
+  <div id="tab-mods" class="tab-pane">
+    <div id="mods-msg"></div>
+    <div id="download-banner"></div>
+    <div class="card">
+      <div class="card-title">Install Mod</div>
+      <div class="row">
+        <input type="text" id="workshop-input" placeholder="Steam Workshop ID (e.g. 2878374713)">
+        <button class="btn-primary" id="install-btn" onclick="installMod()">Install</button>
+      </div>
+      <p style="margin-top:.5rem;font-size:.78rem;color:var(--muted)">Workshop URL: steamcommunity.com/sharedfiles/filedetails/?id=XXXXXXXXX</p>
+    </div>
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <div class="card-title" style="margin-bottom:0">Installed Mods</div>
+        <span id="mod-count" class="text-muted" style="font-size:.8rem"></span>
+      </div>
+      <div id="mods-table"></div>
+    </div>
+  </div>
+
+  <!-- PLAYERS -->
+  <div id="tab-players" class="tab-pane">
+    <div id="players-msg"></div>
+    <div class="card">
+      <div class="card-title">Add to Whitelist</div>
+      <div class="row">
+        <input type="text" id="new-username" placeholder="Username">
+        <select id="new-accesslevel">
+          <option value="none">none</option>
+          <option value="observer">observer</option>
+          <option value="gm">gm</option>
+          <option value="overseer">overseer</option>
+          <option value="moderator">moderator</option>
+          <option value="admin">admin</option>
+        </select>
+        <button class="btn-primary" onclick="addPlayer()">Add</button>
+      </div>
+    </div>
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <div class="card-title" style="margin-bottom:0">Players</div>
+        <span id="player-count" class="text-muted" style="font-size:.8rem"></span>
+      </div>
+      <div id="players-table"></div>
+    </div>
+  </div>
+
+  <!-- LOGS -->
+  <div id="tab-logs" class="tab-pane">
+    <div class="card" style="padding-bottom:.75rem">
+      <div class="log-controls">
+        <button class="btn-secondary btn-sm" id="log-toggle" onclick="toggleLog()">Pause</button>
+        <button class="btn-secondary btn-sm" onclick="clearLog()">Clear</button>
+        <input type="text" id="log-filter" placeholder="Filter..." oninput="applyFilter()" style="width:200px">
+        <span id="log-count" class="text-muted" style="font-size:.8rem"></span>
+      </div>
+      <div id="log-output"></div>
+    </div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div id="tab-settings" class="tab-pane">
+    <div id="settings-msg"></div>
+    <div class="card">
+      <div class="card-title">Pushover Notifications</div>
+      <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem">
+        <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.9rem">
+          <input type="checkbox" id="notif-enabled" style="width:16px;height:16px;accent-color:var(--accent)">
+          Enable notifications
+        </label>
+        <span id="notif-status" class="badge badge-none" style="font-size:.75rem"></span>
+      </div>
+      <div style="display:grid;gap:.75rem;margin-bottom:1.25rem">
+        <div>
+          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">API Token</label>
+          <input type="text" id="notif-token" style="width:100%;font-family:monospace" placeholder="Pushover app token">
+        </div>
+        <div>
+          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">User Key</label>
+          <input type="text" id="notif-userkey" style="width:100%;font-family:monospace" placeholder="Pushover user key">
+        </div>
+      </div>
+      <div class="card-title" style="margin-bottom:.75rem">Notify On</div>
+      <div style="display:grid;gap:.6rem;margin-bottom:1.25rem">
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="evt-serverStart" style="accent-color:var(--accent)">
+          Server started / restarted
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="evt-serverStop" style="accent-color:var(--accent)">
+          Server stopped (manual)
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="evt-serverCrash" style="accent-color:var(--accent)">
+          Server crashed (unexpected stop)
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="evt-downloadComplete" style="accent-color:var(--accent)">
+          Workshop downloads complete
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="evt-lowDisk" style="accent-color:var(--accent)">
+          Low disk space — alert when free space drops below
+          <input type="number" id="notif-diskthreshold" min="1" max="50" style="width:60px;padding:.25rem .4rem" value="5">
+          GB
+        </label>
+      </div>
+      <div class="card-title" style="margin-bottom:.75rem">Player Events</div>
+      <div style="display:grid;gap:.6rem;margin-bottom:1.25rem">
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="evt-playerJoin" style="accent-color:var(--accent)">
+          Player joined
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="evt-playerLeave" style="accent-color:var(--accent)">
+          Player left
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="evt-playerDied" style="accent-color:var(--accent)">
+          Player died
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="evt-playerKicked" style="accent-color:var(--accent)">
+          Player kicked
+        </label>
+      </div>
+      <div style="display:flex;gap:.6rem">
+        <button class="btn-primary" onclick="saveNotifSettings()">Save</button>
+        <button class="btn-secondary" onclick="testNotif()">Send Test</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+var activeTab = 'dashboard'
+var logSource = null
+var logLines = []
+var logPaused = false
+var autoScroll = true
+var downloadPoller = null
+var activeDownloads = []
+var cachedMods = []
+
+// ===== TAB SWITCHING =====
+function switchTab(tab) {
+  if (activeTab === 'mods') stopDownloadPoll()
+  document.getElementById('tab-' + activeTab).classList.remove('active')
+  var tabs = ['dashboard','mods','players','logs','settings']
+  document.querySelectorAll('.tab-btn').forEach(function(b, i) {
+    b.classList.toggle('active', tabs[i] === tab)
+  })
+  activeTab = tab
+  document.getElementById('tab-' + tab).classList.add('active')
+  if (tab === 'logs') startLog()
+  else stopLog()
+  if (tab === 'mods') { fetchMods(); startDownloadPoll() }
+  if (tab === 'players') fetchPlayers()
+  if (tab === 'settings') fetchNotifSettings()
+}
+
+// ===== STATUS =====
+function updateStatus() {
+  fetch('/api/status').then(function(r) { return r.json() }).then(function(d) {
+    var badge = document.getElementById('status-badge')
+    badge.textContent = d.status || 'unknown'
+    badge.className = 'badge-' + (d.status || 'unknown')
+    document.getElementById('dash-status').textContent = d.status || 'unknown'
+    if (d.startedAt && d.status === 'running') {
+      var dt = new Date(d.startedAt)
+      document.getElementById('dash-uptime').textContent = dt.toLocaleString()
+    } else {
+      document.getElementById('dash-uptime').textContent = '—'
+    }
+  }).catch(function() {})
+}
+
+function updateDashStats() {
+  fetch('/api/players').then(function(r) { return r.json() }).then(function(d) {
+    document.getElementById('dash-players').textContent = (d.players || []).length
+  }).catch(function() {})
+  fetch('/api/mods').then(function(r) { return r.json() }).then(function(d) {
+    document.getElementById('dash-mods').textContent = (d.mods || []).length
+  }).catch(function() {})
+  updateSysInfo()
+}
+
+function updateSysInfo() {
+  fetch('/api/sysinfo').then(function(r) { return r.json() }).then(function(d) {
+    document.getElementById('dash-cpu').textContent = d.cpu || '—'
+    document.getElementById('dash-mem').textContent = d.mem ? d.mem.split(' /')[0] : '—'
+    document.getElementById('dash-disk').textContent = d.disk && d.disk.avail !== '—' ? d.disk.avail + ' free (' + d.disk.pct + ' used)' : '—'
+  }).catch(function() {})
+}
+
+// ===== SERVER ACTIONS =====
+function serverAction(action) {
+  var labels = { start: 'Starting...', stop: 'Stopping...', restart: 'Restarting...' }
+  var btn = document.getElementById('btn-' + action)
+  btn.disabled = true
+  btn.innerHTML = '<span class="spin"></span> ' + labels[action]
+  var confirmMsg = { stop: 'Stop the server? Players will be disconnected.', restart: 'Restart? Players will be disconnected.' }
+  if (confirmMsg[action] && !confirm(confirmMsg[action])) {
+    btn.disabled = false
+    btn.textContent = action.charAt(0).toUpperCase() + action.slice(1)
+    return
+  }
+  fetch('/api/server/' + action, { method: 'POST' }).then(function(r) { return r.json() }).then(function(d) {
+    showMsg('dash-msg', d.success ? 'Server ' + action + ' OK.' : ('Failed: ' + d.error), d.success ? 'success' : 'error')
+    setTimeout(updateStatus, 2000)
+  }).catch(function(e) {
+    showMsg('dash-msg', 'Error: ' + e.message, 'error')
+  }).finally(function() {
+    setTimeout(function() {
+      btn.disabled = false
+      btn.textContent = action.charAt(0).toUpperCase() + action.slice(1)
+    }, 3000)
+  })
+}
+
+// ===== DOWNLOADS =====
+function startDownloadPoll() {
+  if (downloadPoller) return
+  fetchDownloads()
+  downloadPoller = setInterval(fetchDownloads, 5000)
+}
+
+function stopDownloadPoll() {
+  clearInterval(downloadPoller); downloadPoller = null
+  activeDownloads = []
+  document.getElementById('download-banner').innerHTML = ''
+}
+
+function fetchDownloads() {
+  fetch('/api/downloads').then(function(r) { return r.json() }).then(function(d) {
+    activeDownloads = d.active || []
+    renderDownloadBanner()
+    renderModsTable(cachedMods)
+  }).catch(function() {})
+}
+
+function renderDownloadBanner() {
+  var banner = document.getElementById('download-banner')
+  if (!activeDownloads.length) { banner.innerHTML = ''; return }
+  var items = activeDownloads.map(function(a) {
+    return a.workshopId + (a.status === 'downloading' && a.total > 0 ? ' (' + a.pct + '%)' : ' queued')
+  }).join(', ')
+  banner.innerHTML = '<div class="msg msg-info" style="margin-bottom:.75rem"><strong>Workshop downloads in progress — do not restart.</strong><br><span style="font-size:.8rem;opacity:.8">Updating: ' + esc(items) + '</span></div>'
+}
+
+// ===== MODS =====
+function fetchMods() {
+  document.getElementById('mods-table').innerHTML = '<div class="empty">Loading...</div>'
+  fetch('/api/mods').then(function(r) { return r.json() }).then(function(d) {
+    cachedMods = d.mods || []
+    document.getElementById('mod-count').textContent = cachedMods.length + ' installed'
+    renderModsTable(cachedMods)
+  })
+}
+
+function renderModsTable(mods) {
+  if (!mods.length) {
+    document.getElementById('mods-table').innerHTML = '<div class="empty">No mods installed</div>'
+    return
+  }
+  var dlMap = {}
+  activeDownloads.forEach(function(a) { dlMap[a.workshopId] = a })
+  var rows = mods.map(function(m) {
+    var dl = dlMap[m.workshopId]
+    var dlBadge = dl
+      ? '<span class="badge" style="background:#1a2e4a;color:#60a5fa;margin-left:.4rem">' + (dl.status === 'downloading' && dl.total > 0 ? '&#8595; ' + dl.pct + '%' : '&#8595; queued') + '</span>'
+      : ''
+    return '<tr>' +
+      '<td><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + m.workshopId + '" target="_blank" class="mono">' + m.workshopId + '</a>' + dlBadge + '</td>' +
+      '<td style="color:var(--muted);font-size:.78rem;max-width:300px;word-break:break-all">' + (m.modIds.join(', ') || '—') + '</td>' +
+      '<td style="color:var(--muted);font-size:.78rem;max-width:200px;word-break:break-all">' + (m.modFolders.join(', ') || '—') + '</td>' +
+      '<td><button class="btn-danger btn-sm" onclick="removeMod(\'' + m.workshopId + '\')">Remove</button></td>' +
+      '</tr>'
+  }).join('')
+  document.getElementById('mods-table').innerHTML = '<table><thead><tr><th>Workshop ID</th><th>Mod IDs</th><th>Folders</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+}
+
+function installMod() {
+  var workshopId = document.getElementById('workshop-input').value.trim()
+  if (!workshopId) return
+  var btn = document.getElementById('install-btn')
+  btn.disabled = true
+  btn.innerHTML = '<span class="spin"></span> Installing...'
+  showMsg('mods-msg', 'Downloading ' + workshopId + ' via SteamCMD — may take a minute...', 'info', 0)
+  fetch('/api/mods/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workshopId: workshopId }) })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok) throw new Error(x.d.error || 'Install failed')
+      document.getElementById('workshop-input').value = ''
+      showMsg('mods-msg', 'Installed ' + workshopId + ' (' + (x.d.modIds.join(', ') || 'no mod IDs') + '). Restart to apply.', 'success', 8000)
+      fetchMods()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Failed: ' + e.message, 'error', 0) })
+    .finally(function() { btn.disabled = false; btn.textContent = 'Install' })
+}
+
+function removeMod(workshopId) {
+  if (!confirm('Remove Workshop item ' + workshopId + '?')) return
+  fetch('/api/mods/' + workshopId, { method: 'DELETE' })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      showMsg('mods-msg', d.success ? 'Removed ' + workshopId + '. Restart to apply.' : 'Error: ' + d.error, d.success ? 'success' : 'error')
+      fetchMods()
+    })
+}
+
+// ===== PLAYERS =====
+function fetchPlayers() {
+  document.getElementById('players-table').innerHTML = '<div class="empty">Loading...</div>'
+  fetch('/api/players').then(function(r) { return r.json() }).then(function(d) {
+    var players = d.players || []
+    document.getElementById('player-count').textContent = players.length + ' accounts'
+    if (!players.length) {
+      document.getElementById('players-table').innerHTML = '<div class="empty">No players</div>'
+      return
+    }
+    var rows = players.map(function(p) {
+      var al = p.accesslevel || 'none'
+      var lastSeen = p.lastConnection ? new Date(p.lastConnection).toLocaleString() : '—'
+      var opts = ['none','observer','gm','overseer','moderator','admin'].map(function(v) {
+        return '<option value="' + v + '"' + (al === v ? ' selected' : '') + '>' + v + '</option>'
+      }).join('')
+      var bannedBtn = p.banned
+        ? '<button class="btn-success btn-sm" onclick="setPlayerBanned(\'' + p.username + '\', false)">Unban</button>'
+        : '<button class="btn-warn btn-sm" onclick="setPlayerBanned(\'' + p.username + '\', true)">Ban</button>'
+      return '<tr>' +
+        '<td class="mono">' + esc(p.username) + (p.displayName && p.displayName !== p.username ? '<br><span class="text-muted" style="font-size:.75rem">' + esc(p.displayName) + '</span>' : '') + '</td>' +
+        '<td>' +
+          '<select class="access-sel" onchange="setAccessLevel(\'' + p.username + '\', this.value)">' + opts + '</select>' +
+        '</td>' +
+        '<td>' + (p.banned ? '<span class="badge badge-banned">banned</span>' : '<span class="badge badge-' + al + '">' + al + '</span>') + '</td>' +
+        '<td class="text-muted" style="font-size:.78rem">' + lastSeen + '</td>' +
+        '<td><div class="actions">' + bannedBtn + '<button class="btn-danger btn-sm" onclick="removePlayer(\'' + p.username + '\')">Remove</button></div></td>' +
+        '</tr>'
+    }).join('')
+    document.getElementById('players-table').innerHTML =
+      '<table><thead><tr><th>Username</th><th>Access Level</th><th>Status</th><th>Last Seen</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+  })
+}
+
+function addPlayer() {
+  var username = document.getElementById('new-username').value.trim()
+  var accesslevel = document.getElementById('new-accesslevel').value
+  if (!username) return
+  fetch('/api/players', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: username, accesslevel: accesslevel }) })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok) throw new Error(x.d.error)
+      document.getElementById('new-username').value = ''
+      showMsg('players-msg', 'Added ' + username + ' as ' + accesslevel + '.', 'success')
+      fetchPlayers()
+    })
+    .catch(function(e) { showMsg('players-msg', 'Failed: ' + e.message, 'error') })
+}
+
+function setAccessLevel(username, accesslevel) {
+  fetch('/api/players/' + encodeURIComponent(username), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accesslevel: accesslevel }) })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      showMsg('players-msg', d.success ? username + ' access level set to ' + accesslevel + '.' : 'Error: ' + d.error, d.success ? 'success' : 'error')
+      fetchPlayers()
+    })
+}
+
+function setPlayerBanned(username, banned) {
+  if (banned && !confirm('Ban ' + username + '?')) return
+  fetch('/api/players/' + encodeURIComponent(username), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ banned: banned }) })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      showMsg('players-msg', d.success ? username + (banned ? ' banned.' : ' unbanned.') : 'Error: ' + d.error, d.success ? 'success' : 'error')
+      fetchPlayers()
+    })
+}
+
+function removePlayer(username) {
+  if (!confirm('Remove ' + username + ' from whitelist?')) return
+  fetch('/api/players/' + encodeURIComponent(username), { method: 'DELETE' })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      showMsg('players-msg', d.success ? username + ' removed.' : 'Error: ' + d.error, d.success ? 'success' : 'error')
+      fetchPlayers()
+    })
+}
+
+// ===== LOGS =====
+function startLog() {
+  if (logSource) return
+  var out = document.getElementById('log-output')
+  logSource = new EventSource('/api/logs?tail=300')
+  logSource.onmessage = function(e) {
+    if (logPaused) return
+    var line = JSON.parse(e.data)
+    logLines.push(line)
+    if (logLines.length > 3000) logLines.shift()
+    appendLogLine(out, line)
+    if (autoScroll) out.scrollTop = out.scrollHeight
+    updateLogCount()
+  }
+  logSource.onerror = function() {
+    appendLogLine(out, '--- connection lost, reconnecting... ---')
+  }
+}
+
+function stopLog() {
+  if (logSource) { logSource.close(); logSource = null }
+}
+
+function toggleLog() {
+  logPaused = !logPaused
+  document.getElementById('log-toggle').textContent = logPaused ? 'Resume' : 'Pause'
+}
+
+function clearLog() {
+  logLines = []
+  document.getElementById('log-output').innerHTML = ''
+  updateLogCount()
+}
+
+function applyFilter() {
+  var filter = document.getElementById('log-filter').value.toLowerCase()
+  var out = document.getElementById('log-output')
+  out.innerHTML = ''
+  var filtered = filter ? logLines.filter(function(l) { return l.toLowerCase().includes(filter) }) : logLines
+  filtered.forEach(function(l) { appendLogLine(out, l) })
+  out.scrollTop = out.scrollHeight
+}
+
+function appendLogLine(container, line) {
+  var filter = document.getElementById('log-filter').value.toLowerCase()
+  if (filter && !line.toLowerCase().includes(filter)) return
+  var div = document.createElement('div')
+  div.className = 'log-line'
+  var cls = 'log-default'
+  var lower = line.toLowerCase()
+  if (lower.includes('error') || lower.includes('exception') || lower.includes('fatal')) cls = 'log-error'
+  else if (lower.includes('warn')) cls = 'log-warn'
+  else if (lower.includes('info') || lower.includes('started') || lower.includes('listening')) cls = 'log-info'
+  // split timestamp from rest
+  var tsMatch = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:.Z]+)\s+(.*)$/)
+  if (tsMatch) {
+    div.innerHTML = '<span class="log-ts">' + esc(tsMatch[1]) + '</span><span class="' + cls + '">' + esc(tsMatch[2]) + '</span>'
+  } else {
+    div.innerHTML = '<span class="' + cls + '">' + esc(line) + '</span>'
+  }
+  container.appendChild(div)
+}
+
+function updateLogCount() {
+  var filter = document.getElementById('log-filter').value
+  var shown = filter ? logLines.filter(function(l) { return l.toLowerCase().includes(filter.toLowerCase()) }).length : logLines.length
+  document.getElementById('log-count').textContent = shown + ' lines'
+}
+
+// ===== UTILS =====
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+}
+
+function showMsg(id, text, type, timeout) {
+  if (timeout === undefined) timeout = 5000
+  var el = document.getElementById(id)
+  el.innerHTML = '<div class="msg msg-' + (type || 'info') + '">' + esc(text) + '</div>'
+  if (timeout) setTimeout(function() { el.innerHTML = '' }, timeout)
+}
+
+// ===== NOTIFICATIONS =====
+function fetchNotifSettings() {
+  fetch('/api/notifications').then(function(r) { return r.json() }).then(function(d) {
+    document.getElementById('notif-enabled').checked = !!d.enabled
+    document.getElementById('notif-token').value = d.token || ''
+    document.getElementById('notif-userkey').value = d.userKey || ''
+    document.getElementById('evt-serverStart').checked = !!(d.events && d.events.serverStart)
+    document.getElementById('evt-serverStop').checked = !!(d.events && d.events.serverStop)
+    document.getElementById('evt-serverCrash').checked = !!(d.events && d.events.serverCrash)
+    document.getElementById('evt-downloadComplete').checked = !!(d.events && d.events.downloadComplete)
+    document.getElementById('evt-lowDisk').checked = !!(d.events && d.events.lowDisk)
+    document.getElementById('notif-diskthreshold').value = d.lowDiskThresholdGB || 5
+    document.getElementById('evt-playerJoin').checked = !!(d.events && d.events.playerJoin)
+    document.getElementById('evt-playerLeave').checked = !!(d.events && d.events.playerLeave)
+    document.getElementById('evt-playerDied').checked = !!(d.events && d.events.playerDied)
+    document.getElementById('evt-playerKicked').checked = !!(d.events && d.events.playerKicked)
+    var status = document.getElementById('notif-status')
+    status.textContent = d.enabled ? 'active' : 'disabled'
+    status.className = 'badge ' + (d.enabled ? 'badge-gm' : 'badge-none')
+  }).catch(function() {})
+}
+
+function saveNotifSettings() {
+  var cfg = {
+    enabled: document.getElementById('notif-enabled').checked,
+    token: document.getElementById('notif-token').value.trim(),
+    userKey: document.getElementById('notif-userkey').value.trim(),
+    events: {
+      serverStart: document.getElementById('evt-serverStart').checked,
+      serverStop: document.getElementById('evt-serverStop').checked,
+      serverCrash: document.getElementById('evt-serverCrash').checked,
+      downloadComplete: document.getElementById('evt-downloadComplete').checked,
+      lowDisk: document.getElementById('evt-lowDisk').checked,
+      playerJoin: document.getElementById('evt-playerJoin').checked,
+      playerLeave: document.getElementById('evt-playerLeave').checked,
+      playerDied: document.getElementById('evt-playerDied').checked,
+      playerKicked: document.getElementById('evt-playerKicked').checked
+    },
+    lowDiskThresholdGB: parseInt(document.getElementById('notif-diskthreshold').value) || 5
+  }
+  fetch('/api/notifications', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      showMsg('settings-msg', d.success ? 'Settings saved.' : 'Error: ' + d.error, d.success ? 'success' : 'error')
+      fetchNotifSettings()
+    }).catch(function(e) { showMsg('settings-msg', 'Error: ' + e.message, 'error') })
+}
+
+function testNotif() {
+  showMsg('settings-msg', 'Sending test notification...', 'info', 0)
+  fetch('/api/notifications/test', { method: 'POST' })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      showMsg('settings-msg', d.success ? 'Test sent! Check your device.' : 'Failed: ' + (d.body || d.error), d.success ? 'success' : 'error')
+    }).catch(function(e) { showMsg('settings-msg', 'Error: ' + e.message, 'error') })
+}
+
+// ===== INIT =====
+updateStatus()
+updateDashStats()
+fetchMods()
+setInterval(updateStatus, 15000)
+setInterval(updateSysInfo, 30000)
+</script>
+</body>
+</html>
