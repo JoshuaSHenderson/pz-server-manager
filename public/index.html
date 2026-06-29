@@ -137,6 +137,7 @@ tr:hover td { background: var(--bg3) }
     <button class="tab-btn" onclick="switchTab('mods')">Mods</button>
     <button class="tab-btn" onclick="switchTab('players')">Players</button>
     <button class="tab-btn" onclick="switchTab('logs')">Logs</button>
+    <button class="tab-btn" onclick="switchTab('config')">Config</button>
     <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
   </nav>
 </header>
@@ -235,6 +236,63 @@ tr:hover td { background: var(--bg3) }
     </div>
   </div>
 
+
+  <!-- CONFIG -->
+  <div id="tab-config" class="tab-pane">
+    <div id="config-msg"></div>
+    <div class="card">
+      <div class="card-title">Server Settings</div>
+      <p style="font-size:.85rem;color:var(--muted);margin:0 0 1.25rem">Changes require a server restart to take effect.</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.25rem">
+        <div>
+          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Server Name</label>
+          <input type="text" id="cfg-PublicName" style="width:100%">
+        </div>
+        <div>
+          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Password <span style="font-weight:400">(blank = no password)</span></label>
+          <input type="text" id="cfg-Password" style="width:100%">
+        </div>
+        <div>
+          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Max Players</label>
+          <input type="number" id="cfg-MaxPlayers" min="1" max="100" style="width:100%">
+        </div>
+        <div>
+          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Loot Respawn (hours, 0=off)</label>
+          <input type="number" id="cfg-HoursForLootRespawn" min="0" style="width:100%">
+        </div>
+        <div>
+          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Autosave Every (minutes)</label>
+          <input type="number" id="cfg-SaveWorldEveryMinutes" min="0" style="width:100%">
+        </div>
+      </div>
+      <div class="card-title" style="margin-bottom:.75rem">Gameplay Flags</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-bottom:1.25rem">
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="cfg-PVP" style="accent-color:var(--accent)"> PvP enabled
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="cfg-SafetySystem" style="accent-color:var(--accent)"> Safety system (PvP toggle)
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="cfg-Open" style="accent-color:var(--accent)"> Open (no whitelist)
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="cfg-Public" style="accent-color:var(--accent)"> Public (show in server browser)
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="cfg-PauseEmpty" style="accent-color:var(--accent)"> Pause when empty
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="cfg-GlobalChat" style="accent-color:var(--accent)"> Global chat
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="cfg-VoiceEnable" style="accent-color:var(--accent)"> Voice chat
+        </label>
+      </div>
+      <button class="btn-primary" onclick="saveConfig()">Save</button>
+    </div>
+  </div>
+
   <!-- SETTINGS -->
   <div id="tab-settings" class="tab-pane">
     <div id="settings-msg"></div>
@@ -306,6 +364,46 @@ tr:hover td { background: var(--bg3) }
         <button class="btn-secondary" onclick="testNotif()">Send Test</button>
       </div>
     </div>
+    <div class="card" style="margin-top:1.25rem">
+      <div class="card-title">Discord Status Message</div>
+      <p style="font-size:.85rem;color:var(--muted);margin:0 0 1rem">Posts a live server status to a Discord channel via webhook. Updates every 5 minutes automatically.</p>
+      <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem">
+        <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.9rem">
+          <input type="checkbox" id="discord-enabled" style="width:16px;height:16px;accent-color:var(--accent)">
+          Enable Discord status
+        </label>
+      </div>
+      <div style="display:grid;gap:.75rem;margin-bottom:1.25rem">
+        <div>
+          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Webhook URL</label>
+          <input type="text" id="discord-webhook" style="width:100%;font-family:monospace" placeholder="https://discord.com/api/webhooks/...">
+        </div>
+        <div>
+          <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem;margin-bottom:.75rem">
+            <input type="checkbox" id="discord-richcard" style="accent-color:var(--accent)" onchange="toggleDiscordMode()">
+            Use rich card (embed with status badge, uptime, mod count)
+          </label>
+          <div id="discord-richcard-fields" style="display:none;margin-bottom:.5rem">
+            <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Server IP:Port <span style="font-weight:400">(shown as connect address in card)</span></label>
+            <input type="text" id="discord-serverip" style="width:100%;font-family:monospace" placeholder="137.103.3.3:16261">
+          </div>
+          <div id="discord-template-fields">
+            <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Message Template &mdash; use <code>&lt;ZomboidServerStats&gt;</code> and optionally <code>&lt;LastUpdated&gt;</code></label>
+            <textarea id="discord-template" rows="3" style="width:100%;font-family:monospace;resize:vertical;box-sizing:border-box" placeholder="Project Zomboid Server: &lt;ZomboidServerStats&gt;"></textarea>
+          </div>
+        </div>
+        <div>
+          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Pinned Message ID <span style="font-weight:400">(auto-set after first update)</span></label>
+          <div style="display:flex;gap:.5rem">
+            <input type="text" id="discord-messageid" readonly style="flex:1;font-family:monospace;opacity:.7" placeholder="(none -- created on first update)">
+            <button class="btn-secondary btn-sm" onclick="clearDiscordMessage()">Clear</button>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;gap:.6rem">
+        <button class="btn-primary" onclick="saveAndUpdateDiscord()">Save &amp; Update Now</button>
+      </div>
+    </div>
   </div>
 </main>
 
@@ -323,7 +421,7 @@ var cachedMods = []
 function switchTab(tab) {
   if (activeTab === 'mods') stopDownloadPoll()
   document.getElementById('tab-' + activeTab).classList.remove('active')
-  var tabs = ['dashboard','mods','players','logs','settings']
+  var tabs = ['dashboard','mods','players','logs','config','settings']
   document.querySelectorAll('.tab-btn').forEach(function(b, i) {
     b.classList.toggle('active', tabs[i] === tab)
   })
@@ -334,6 +432,7 @@ function switchTab(tab) {
   if (tab === 'mods') { fetchMods(); startDownloadPoll() }
   if (tab === 'players') fetchPlayers()
   if (tab === 'settings') fetchNotifSettings()
+  if (tab === 'config') fetchConfig()
 }
 
 // ===== STATUS =====
@@ -664,10 +763,18 @@ function fetchNotifSettings() {
     var status = document.getElementById('notif-status')
     status.textContent = d.enabled ? 'active' : 'disabled'
     status.className = 'badge ' + (d.enabled ? 'badge-gm' : 'badge-none')
+    var disc = d.discord || {}
+    document.getElementById('discord-enabled').checked = !!disc.enabled
+    document.getElementById('discord-webhook').value = disc.webhookUrl || ''
+    document.getElementById('discord-richcard').checked = !!disc.richCard
+    document.getElementById('discord-serverip').value = disc.serverIp || ''
+    document.getElementById('discord-template').value = disc.template || ''
+    document.getElementById('discord-messageid').value = disc.messageId || ''
+    toggleDiscordMode()
   }).catch(function() {})
 }
 
-function saveNotifSettings() {
+function saveNotifSettings(cb) {
   var cfg = {
     enabled: document.getElementById('notif-enabled').checked,
     token: document.getElementById('notif-token').value.trim(),
@@ -683,14 +790,44 @@ function saveNotifSettings() {
       playerDied: document.getElementById('evt-playerDied').checked,
       playerKicked: document.getElementById('evt-playerKicked').checked
     },
-    lowDiskThresholdGB: parseInt(document.getElementById('notif-diskthreshold').value) || 5
+    lowDiskThresholdGB: parseInt(document.getElementById('notif-diskthreshold').value) || 5,
+    discord: {
+      enabled: document.getElementById('discord-enabled').checked,
+      webhookUrl: document.getElementById('discord-webhook').value.trim(),
+      messageId: document.getElementById('discord-messageid').value.trim(),
+      richCard: document.getElementById('discord-richcard').checked,
+      serverIp: document.getElementById('discord-serverip').value.trim(),
+      template: document.getElementById('discord-template').value
+    }
   }
   fetch('/api/notifications', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) })
     .then(function(r) { return r.json() })
     .then(function(d) {
+      if (cb) return cb(d)
       showMsg('settings-msg', d.success ? 'Settings saved.' : 'Error: ' + d.error, d.success ? 'success' : 'error')
       fetchNotifSettings()
     }).catch(function(e) { showMsg('settings-msg', 'Error: ' + e.message, 'error') })
+}
+
+function saveAndUpdateDiscord() {
+  saveNotifSettings(function(d) {
+    if (!d.success) return showMsg('settings-msg', 'Save failed: ' + d.error, 'error')
+    showMsg('settings-msg', 'Settings saved. Updating Discord...', 'info', 0)
+    fetch('/api/discord/update', { method: 'POST' })
+      .then(function(r) { return r.json() })
+      .then(function(ud) {
+        showMsg('settings-msg', ud.success ? 'Discord status updated.' : 'Discord error: ' + ud.error, ud.success ? 'success' : 'error')
+        fetchNotifSettings()
+      }).catch(function(e) { showMsg('settings-msg', 'Error: ' + e.message, 'error') })
+  })
+}
+
+function clearDiscordMessage() {
+  fetch('/api/notifications').then(function(r) { return r.json() }).then(function(cfg) {
+    if (!cfg.discord) cfg.discord = {}
+    cfg.discord.messageId = ''
+    return fetch('/api/notifications', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) })
+  }).then(function() { fetchNotifSettings() })
 }
 
 function testNotif() {
@@ -700,6 +837,43 @@ function testNotif() {
     .then(function(d) {
       showMsg('settings-msg', d.success ? 'Test sent! Check your device.' : 'Failed: ' + (d.body || d.error), d.success ? 'success' : 'error')
     }).catch(function(e) { showMsg('settings-msg', 'Error: ' + e.message, 'error') })
+}
+
+function toggleDiscordMode() {
+  var rich = document.getElementById('discord-richcard').checked
+  document.getElementById('discord-richcard-fields').style.display = rich ? '' : 'none'
+  document.getElementById('discord-template-fields').style.display = rich ? 'none' : ''
+}
+
+// ===== CONFIG =====
+var cfgBools = ['PVP','SafetySystem','Open','Public','PauseEmpty','GlobalChat','VoiceEnable']
+function fetchConfig() {
+  fetch('/api/config').then(function(r) { return r.json() }).then(function(d) {
+    document.getElementById('cfg-PublicName').value = d.PublicName || ''
+    document.getElementById('cfg-Password').value = d.Password || ''
+    document.getElementById('cfg-MaxPlayers').value = d.MaxPlayers || ''
+    document.getElementById('cfg-HoursForLootRespawn').value = d.HoursForLootRespawn || ''
+    document.getElementById('cfg-SaveWorldEveryMinutes').value = d.SaveWorldEveryMinutes || ''
+    cfgBools.forEach(function(k) {
+      document.getElementById('cfg-' + k).checked = (d[k] || '').toLowerCase() === 'true'
+    })
+  }).catch(function() {})
+}
+function saveConfig() {
+  var body = {
+    PublicName: document.getElementById('cfg-PublicName').value,
+    Password: document.getElementById('cfg-Password').value,
+    MaxPlayers: document.getElementById('cfg-MaxPlayers').value,
+    HoursForLootRespawn: document.getElementById('cfg-HoursForLootRespawn').value,
+    SaveWorldEveryMinutes: document.getElementById('cfg-SaveWorldEveryMinutes').value
+  }
+  cfgBools.forEach(function(k) {
+    body[k] = document.getElementById('cfg-' + k).checked ? 'true' : 'false'
+  })
+  fetch('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function(r) { return r.json() })
+    .then(function(d) { showMsg('config-msg', d.success ? 'Saved. Restart server to apply.' : 'Error: ' + d.error, d.success ? 'success' : 'error') })
+    .catch(function(e) { showMsg('config-msg', 'Error: ' + e.message, 'error') })
 }
 
 // ===== INIT =====

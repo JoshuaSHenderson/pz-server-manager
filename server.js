@@ -26,6 +26,18 @@ function setIniList(key, values) {
   fs.writeFileSync(INI_PATH, ini)
 }
 
+// --- INI single-value helpers ---
+function getIniValue(key, def) {
+  const m = readIni().match(new RegExp('^' + key + '=(.*)$', 'm'))
+  return m ? m[1].trim() : (def !== undefined ? def : '')
+}
+function setIniValue(key, value) {
+  const ini = readIni()
+  const re = new RegExp('^' + key + '=.*$', 'm')
+  const line = key + "=" + value
+  fs.writeFileSync(INI_PATH, re.test(ini) ? ini.replace(re, line) : ini + "\n" + line)
+}
+
 // --- Workshop helpers ---
 function findModInfo(modFolder) {
   const direct = path.join(modFolder, 'mod.info')
@@ -73,8 +85,8 @@ const ACCESS_LEVELS = ['none', 'observer', 'gm', 'overseer', 'moderator', 'admin
 // --- Notification helpers ---
 const DEFAULT_NOTIF = {
   enabled: false,
-  token: '',    // configure via Settings tab in the UI
-  userKey: '',  // configure via Settings tab in the UI
+  token: '',
+  userKey: '',
   events: {
     serverStart: true,
     serverStop: true,
@@ -86,13 +98,24 @@ const DEFAULT_NOTIF = {
     playerDied: true,
     playerKicked: true
   },
-  lowDiskThresholdGB: 5
+  lowDiskThresholdGB: 5,
+  discord: {
+    enabled: false,
+    webhookUrl: '',
+    messageId: '',
+    richCard: false,
+    serverIp: '',
+    template: 'Project Zomboid Server: <ZomboidServerStats> | Last updated: <LastUpdated>'
+  }
 }
 
 function readNotifConfig() {
   try {
     const saved = JSON.parse(fs.readFileSync(NOTIF_PATH, 'utf8'))
-    return Object.assign({}, DEFAULT_NOTIF, saved, { events: Object.assign({}, DEFAULT_NOTIF.events, saved.events || {}) })
+    return Object.assign({}, DEFAULT_NOTIF, saved, {
+      events: Object.assign({}, DEFAULT_NOTIF.events, saved.events || {}),
+      discord: Object.assign({}, DEFAULT_NOTIF.discord, saved.discord || {})
+    })
   } catch { return Object.assign({}, DEFAULT_NOTIF) }
 }
 function writeNotifConfig(cfg) {
@@ -109,6 +132,78 @@ function pushover(title, message) {
   req.on('error', () => {})
   req.write(data); req.end()
 }
+
+// --- Discord Status helpers ---
+function discordRequest(method, urlPath, body, cb) {
+  const data = body ? JSON.stringify(body) : null
+  const opts = {
+    hostname: 'discord.com', path: '/api/v10' + urlPath, method,
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'PZServerManager/1.0' }
+  }
+  if (data) opts.headers['Content-Length'] = Buffer.byteLength(data)
+  const req = https.request(opts, r => {
+    let out = ''
+    r.on('data', c => out += c)
+    r.on('end', () => { try { cb(null, JSON.parse(out), r.statusCode) } catch { cb(null, out, r.statusCode) } })
+  })
+  req.on('error', e => cb(e))
+  if (data) req.write(data)
+  req.end()
+}
+
+function parseWebhookUrl(url) {
+  const m = (url || '').match(/webhooks\/(\d+)\/([^/?#\s]+)/)
+  return m ? { id: m[1], token: m[2] } : null
+}
+
+function updateDiscordStatus(cb) {
+  const cfg = readNotifConfig()
+  if (!cfg.discord || !cfg.discord.enabled || !cfg.discord.webhookUrl) return cb && cb()
+  const wh = parseWebhookUrl(cfg.discord.webhookUrl)
+  if (!wh) return cb && cb()
+  exec('docker inspect zomboid --format "{{.State.Status}}|{{.State.StartedAt}}"', (err, out) => {
+    const parts = (out || '').trim().split('|')
+    const isOnline = parts[0] === 'running'
+    let body
+    if (cfg.discord.richCard) {
+      const serverName = getIniValue('PublicName') || getIniValue('ServerName') || 'Project Zomboid'
+      const modCount = getIniList('WorkshopItems').length
+      let uptime = '—'
+      if (isOnline && parts[1]) {
+        const ms = Date.now() - new Date(parts[1]).getTime()
+        const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000)
+        uptime = h > 0 ? h + 'h ' + m + 'm' : m + 'm'
+      }
+      const fields = [
+        { name: 'Status', value: isOnline ? '🟢 **Online**' : '🔴 **Offline**', inline: true },
+        { name: 'Uptime', value: uptime, inline: true },
+        { name: 'Mods', value: String(modCount), inline: true }
+      ]
+      if (cfg.discord.serverIp) fields.push({ name: 'Connect', value: '`' + cfg.discord.serverIp + '`', inline: false })
+      body = { embeds: [{ title: serverName, color: isOnline ? 5763719 : 15548997, fields, timestamp: new Date().toISOString() }] }
+    } else {
+      const template = cfg.discord.template || 'Project Zomboid Server: <ZomboidServerStats>'
+      const content = template
+        .replace('<ZomboidServerStats>', isOnline ? '🟢 Online' : '🔴 Offline')
+        .replace('<LastUpdated>', new Date().toUTCString())
+      body = { content }
+    }
+    const save = id => { cfg.discord.messageId = id; writeNotifConfig(cfg) }
+    if (cfg.discord.messageId) {
+      discordRequest('PATCH', '/webhooks/' + wh.id + '/' + wh.token + '/messages/' + cfg.discord.messageId, body, (e, data, status) => {
+        if (status === 404) { save(''); updateDiscordStatus(cb) }
+        else cb && cb(null, data)
+      })
+    } else {
+      discordRequest('POST', '/webhooks/' + wh.id + '/' + wh.token + '?wait=true', body, (e, data, status) => {
+        if (data && data.id) save(data.id)
+        cb && cb(null, data)
+      })
+    }
+  })
+}
+
+setInterval(updateDiscordStatus, 5 * 60 * 1000)
 
 // --- Download state parser (shared by endpoint + background checker) ---
 function parseDownloads(lines) {
@@ -420,6 +515,27 @@ app.delete('/api/mods/:workshopId', (req, res) => {
   res.json({ success: true, workshopId, removedIds, removedFolders })
 })
 
+// ===== SERVER CONFIG =====
+
+const CONFIG_FIELDS = [
+  'PublicName','Password','MaxPlayers','PVP','SafetySystem','Open','Public',
+  'PauseEmpty','GlobalChat','VoiceEnable','HoursForLootRespawn','SaveWorldEveryMinutes'
+]
+
+app.get('/api/config', (req, res) => {
+  const cfg = {}
+  for (const k of CONFIG_FIELDS) cfg[k] = getIniValue(k)
+  res.json(cfg)
+})
+
+app.put('/api/config', (req, res) => {
+  const updates = req.body
+  for (const k of CONFIG_FIELDS) {
+    if (updates[k] !== undefined) setIniValue(k, updates[k])
+  }
+  res.json({ success: true })
+})
+
 // ===== SYSTEM STATS =====
 
 app.get('/api/sysinfo', (req, res) => {
@@ -471,6 +587,10 @@ app.post('/api/notifications/test', (req, res) => {
   })
   request.on('error', e => res.status(500).json({ error: e.message }))
   request.write(data); request.end()
+})
+
+app.post('/api/discord/update', (req, res) => {
+  updateDiscordStatus((err, data) => res.json({ success: !err, data, error: err ? err.message : null }))
 })
 
 app.listen(7777, () => console.log('PZ Server Manager on :7777'))
