@@ -1197,16 +1197,48 @@ app.get('/api/mods', (req, res) => {
   const queue = readQueue(s)
   const qById = {}
   for (const e of queue) qById[e.id] = e
+
+  // Which collection(s) each mod came from. The registry is authoritative (it's re-resolved on
+  // every sync); the queue's collectionId is a fallback for mods installed before a collection
+  // was tracked. A mod can legitimately belong to more than one collection.
+  const collections = readCollections(s)
+  const byMod = {}
+  for (const c of collections) {
+    for (const item of (c.items || [])) {
+      if (!byMod[item]) byMod[item] = []
+      if (!byMod[item].some(x => x.id === c.id)) byMod[item].push({ id: c.id, title: c.title || '' })
+    }
+  }
+  for (const [wid, q] of Object.entries(qById)) {
+    if (!q.collectionId) continue
+    if (!byMod[wid]) byMod[wid] = []
+    if (!byMod[wid].some(x => x.id === q.collectionId)) byMod[wid].push({ id: q.collectionId, title: '' })
+  }
+
   const base = workshopIds.map(wid => {
     const modIds = modIdsFromWorkshop(s, wid)
     const folders = modNamesFromWorkshop(s, wid)
     const q = qById[wid]
     let status = 'ok'
     if (!modIds.length) status = (q && q.status === 'collection') ? 'collection' : 'missing'
-    return { workshopId: wid, modIds, modFolders: folders, status, error: (q && q.error) || null }
+    return {
+      workshopId: wid, modIds, modFolders: folders, status,
+      error: (q && q.error) || null,
+      collections: byMod[wid] || []
+    }
   })
-  getTitles(workshopIds, titles => {
-    res.json({ mods: base.map(m => Object.assign(m, { title: titles[m.workshopId] || '' })) })
+
+  // Resolve titles for the mods and for any collection we don't already have a name for.
+  const needTitles = workshopIds.concat(
+    base.reduce((acc, m) => acc.concat(m.collections.filter(c => !c.title).map(c => c.id)), [])
+  )
+  getTitles([...new Set(needTitles)], titles => {
+    res.json({
+      mods: base.map(m => Object.assign(m, {
+        title: titles[m.workshopId] || '',
+        collections: m.collections.map(c => ({ id: c.id, title: c.title || titles[c.id] || '' }))
+      }))
+    })
   })
 })
 

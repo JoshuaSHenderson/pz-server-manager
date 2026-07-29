@@ -674,7 +674,7 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;gap:1rem;flex-wrap:wrap">
         <div class="card-title" style="margin-bottom:0">Installed Mods</div>
         <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap">
-          <input type="text" id="mod-filter" placeholder="Filter..." oninput="renderModsTable(cachedMods)" style="width:170px;padding:.35rem .55rem;font-size:.82rem">
+          <input type="text" id="mod-filter" placeholder="Filter by name, ID, collection..." oninput="renderModsTable(cachedMods)" style="width:220px;padding:.35rem .55rem;font-size:.82rem">
           <span id="mod-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap"></span>
         </div>
       </div>
@@ -975,6 +975,7 @@ var autoScroll = true
 var downloadPoller = null
 var activeDownloads = []
 var cachedMods = []
+var cachedCollections = []
 
 var ALL_TABS = ['dashboard','mods','players','logs','config','backups','settings']
 
@@ -1234,6 +1235,28 @@ function fetchMods() {
   })
 }
 
+// Sort state for the installed-mods table. Clicking a header toggles direction.
+var modSort = { key: 'title', dir: 1 }
+function sortMods(key) {
+  if (modSort.key === key) modSort.dir *= -1
+  else { modSort.key = key; modSort.dir = 1 }
+  renderModsTable(cachedMods)
+}
+
+// Missing titles/collections sort last regardless of direction, so an unresolved row never
+// displaces real content at the top of the list.
+function modSortValue(m, key) {
+  if (key === 'title') return (m.title || '').toLowerCase()
+  if (key === 'workshopId') return m.workshopId
+  if (key === 'modIds') return (m.modIds[0] || '').toLowerCase()
+  if (key === 'collection') return (m.collections || []).map(function(c) { return (c.title || c.id).toLowerCase() }).sort().join(', ')
+  if (key === 'status') {
+    var order = { missing: 0, collection: 1, ok: 2 }
+    return String(order[m.status] !== undefined ? order[m.status] : 9)
+  }
+  return ''
+}
+
 function renderModsTable(mods) {
   var problems = mods.filter(function(m) { return m.status === 'missing' })
   var probEl = document.getElementById('mods-problems')
@@ -1249,7 +1272,8 @@ function renderModsTable(mods) {
   var shown = f ? mods.filter(function(m) {
     return (m.title || '').toLowerCase().indexOf(f) !== -1 ||
            m.workshopId.indexOf(f) !== -1 ||
-           m.modIds.join(' ').toLowerCase().indexOf(f) !== -1
+           m.modIds.join(' ').toLowerCase().indexOf(f) !== -1 ||
+           (m.collections || []).some(function(c) { return (c.title || '').toLowerCase().indexOf(f) !== -1 || c.id.indexOf(f) !== -1 })
   }) : mods
 
   var okCount = mods.filter(function(m) { return m.status === 'ok' }).length
@@ -1260,6 +1284,16 @@ function renderModsTable(mods) {
     document.getElementById('mods-table').innerHTML = '<div class="empty">' + (f ? 'No mods match "' + esc(filter) + '"' : 'No mods installed') + '</div>'
     return
   }
+
+  shown = shown.slice().sort(function(a, b) {
+    var av = modSortValue(a, modSort.key), bv = modSortValue(b, modSort.key)
+    // Blanks always sink, whichever way the column is sorted.
+    if (av === '' && bv !== '') return 1
+    if (bv === '' && av !== '') return -1
+    if (av < bv) return -modSort.dir
+    if (av > bv) return modSort.dir
+    return (a.title || '').toLowerCase().localeCompare((b.title || '').toLowerCase())
+  })
 
   var dlMap = {}
   activeDownloads.forEach(function(a) { dlMap[a.workshopId] = a })
@@ -1277,22 +1311,36 @@ function renderModsTable(mods) {
     } else {
       statusHtml = '<span style="color:#2ecc71">OK</span>'
     }
-    var name = m.title
-      ? esc(m.title)
-      : '<span class="text-muted">(unknown title)</span>'
+    var name = m.title ? esc(m.title) : '<span class="text-muted">(unknown title)</span>'
     var detail = m.modIds.length
       ? '<span style="font-size:.75rem;color:var(--muted)">' + esc(m.modIds.join(', ')) + '</span>'
       : '<span style="font-size:.75rem;color:var(--muted)">—</span>'
+    var coll = (m.collections && m.collections.length)
+      ? m.collections.map(function(c) {
+          return '<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + c.id + '" target="_blank" ' +
+            'style="font-size:.75rem;color:#60a5fa;text-decoration:none">' + esc(c.title || c.id) + '</a>'
+        }).join('<br>')
+      : '<span style="font-size:.75rem;color:var(--muted)">standalone</span>'
     return '<tr>' +
       '<td><div>' + name + '</div>' +
         '<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + m.workshopId + '" target="_blank" class="mono" style="font-size:.72rem;opacity:.7">' + m.workshopId + '</a></td>' +
       '<td>' + detail + '</td>' +
+      '<td>' + coll + '</td>' +
       '<td>' + statusHtml + '</td>' +
       '<td><button class="btn-danger btn-sm" onclick="removeMod(\'' + m.workshopId + '\')">Remove</button></td>' +
       '</tr>'
   }).join('')
+
+  function th(key, label) {
+    var active = modSort.key === key
+    var arrow = active ? (modSort.dir === 1 ? ' &#9650;' : ' &#9660;') : ''
+    return '<th onclick="sortMods(\'' + key + '\')" style="cursor:pointer;user-select:none' +
+      (active ? ';color:var(--accent)' : '') + '" title="Sort by ' + label + '">' + label + arrow + '</th>'
+  }
   document.getElementById('mods-table').innerHTML =
-    '<table><thead><tr><th>Mod</th><th>Mod IDs</th><th>Status</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+    '<table><thead><tr>' +
+      th('title', 'Mod') + th('modIds', 'Mod IDs') + th('collection', 'Collection') + th('status', 'Status') +
+      '<th></th></tr></thead><tbody>' + rows + '</tbody></table>'
 }
 
 function repairMods() {
@@ -1364,12 +1412,29 @@ function fetchCollections() {
   }).catch(function() {})
 }
 
+var collSort = { key: 'title', dir: 1 }
+function sortCollections(key) {
+  if (collSort.key === key) collSort.dir *= -1
+  else { collSort.key = key; collSort.dir = 1 }
+  renderCollections(cachedCollections)
+}
+
 function renderCollections(colls) {
+  cachedCollections = colls
   if (!colls.length) {
     document.getElementById('collections-table').innerHTML =
       '<div class="empty">No collections tracked. Add one above to install and keep it in sync.</div>'
     return
   }
+  colls = colls.slice().sort(function(a, b) {
+    var av, bv
+    if (collSort.key === 'missing') { av = a.missingCount; bv = b.missingCount }
+    else if (collSort.key === 'synced') { av = a.lastSynced || ''; bv = b.lastSynced || '' }
+    else { av = (a.title || a.id).toLowerCase(); bv = (b.title || b.id).toLowerCase() }
+    if (av < bv) return -collSort.dir
+    if (av > bv) return collSort.dir
+    return 0
+  })
   var rows = colls.map(function(c) {
     var synced = c.lastSynced ? new Date(c.lastSynced).toLocaleString() : '—'
     var health = c.missingCount > 0
@@ -1387,8 +1452,15 @@ function renderCollections(colls) {
         '<button class="btn-danger btn-sm" onclick="removeCollection(\'' + c.id + '\')">Remove</button>' +
       '</td></tr>'
   }).join('')
+  function cth(key, label) {
+    var active = collSort.key === key
+    var arrow = active ? (collSort.dir === 1 ? ' &#9650;' : ' &#9660;') : ''
+    return '<th onclick="sortCollections(\'' + key + '\')" style="cursor:pointer;user-select:none' +
+      (active ? ';color:var(--accent)' : '') + '" title="Sort by ' + label + '">' + label + arrow + '</th>'
+  }
   document.getElementById('collections-table').innerHTML =
-    '<table><thead><tr><th>Collection</th><th>Mods</th><th>Last Synced</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+    '<table><thead><tr>' + cth('title', 'Collection') + cth('missing', 'Mods') + cth('synced', 'Last Synced') +
+    '<th></th></tr></thead><tbody>' + rows + '</tbody></table>'
 }
 
 function syncCollection(id) {
