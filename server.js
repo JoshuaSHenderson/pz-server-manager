@@ -906,13 +906,78 @@ app.get('/api/mods', (req, res) => {
   res.json({ mods })
 })
 
-// Downloads one Workshop item via SteamCMD inside the server container. Callback gets
-// (err, stderr) — err is set only on a hard SteamCMD failure, not "no mod folders found".
-function steamcmdDownload(s, workshopIds, cb) {
-  const items = workshopIds.map(id => '+workshop_download_item 108600 ' + id).join(' ')
-  const cmd = 'docker exec ' + s.container + ' /home/steam/steamcmd/steamcmd.sh +force_install_dir /home/steam/pz-dedicated +login anonymous ' + items + ' +quit'
-  exec(cmd, { timeout: 600000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => cb(err, stderr))
+// --- Download queue (persisted — survives a mod-manager container restart) ---
+// One JSON array per server: { id, source: 'single'|'collection', collectionId, status:
+// 'queued'|'installed'|'failed', queuedAt, updatedAt, error, modIds, copiedFolders }
+function queuePath(s) { return s.data + '/download-queue.json' }
+function readQueue(s) {
+  try { return JSON.parse(fs.readFileSync(queuePath(s), 'utf8')) } catch { return [] }
 }
+function writeQueue(s, queue) {
+  try { fs.writeFileSync(queuePath(s), JSON.stringify(queue.slice(-200), null, 2)) } catch (e) { console.error('[queue] write failed:', e.message) }
+}
+function queueAdd(s, workshopIds, source, collectionId) {
+  const queue = readQueue(s)
+  const now = new Date().toISOString()
+  for (const id of workshopIds) {
+    queue.push({ id, source, collectionId: collectionId || null, status: 'queued', queuedAt: now, updatedAt: now })
+  }
+  writeQueue(s, queue)
+}
+function queueUpdate(s, id, patch) {
+  const queue = readQueue(s)
+  const entry = queue.slice().reverse().find(e => e.id === id && e.status === 'queued')
+  if (entry) Object.assign(entry, patch, { updatedAt: new Date().toISOString() })
+  writeQueue(s, queue)
+}
+
+// Kicks off a SteamCMD download for one or more Workshop items and returns immediately —
+// runs via a *detached* `docker exec -d` inside the PZ server container itself, so the
+// download keeps running even if this manager process is restarted (e.g. redeployed) mid-way.
+// Completion is detected later by reconcileDownloads() polling docker logs + the queue file,
+// not by holding a callback on this process, which is what made prior downloads vanish
+// silently if the manager container was rebuilt while one was in flight.
+function steamcmdDownload(s, workshopIds, source, collectionId) {
+  queueAdd(s, workshopIds, source, collectionId)
+  const items = workshopIds.map(id => '+workshop_download_item 108600 ' + id).join(' ')
+  const cmd = 'docker exec -d ' + s.container + ' /home/steam/steamcmd/steamcmd.sh +force_install_dir /home/steam/pz-dedicated +login anonymous ' + items + ' +quit'
+  exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
+    if (err) {
+      console.error('[download] failed to start for ' + s.name + ':', stderr || err.message)
+      for (const id of workshopIds) queueUpdate(s, id, { status: 'failed', error: 'Could not start SteamCMD' })
+    }
+  })
+}
+
+// Runs on an interval: reconciles the persisted queue against what SteamCMD's log actually
+// shows is still active. Anything that WAS queued and is no longer active gets registered
+// (mods copied + ini updated) and marked done — this is what actually finishes a download
+// that was kicked off by steamcmdDownload above, independent of which process started it.
+function reconcileDownloads(s) {
+  const queue = readQueue(s)
+  const pending = queue.filter(e => e.status === 'queued')
+  if (!pending.length) return
+  exec('docker logs ' + s.container + ' --tail 1000 2>&1', { maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
+    const activeIds = new Set(parseDownloads((out || '').split('\n')).map(a => a.workshopId))
+    let changed = false
+    for (const entry of pending) {
+      if (activeIds.has(entry.id)) continue // still downloading
+      try {
+        const { modIds, copiedFolders } = registerInstalledMod(s, entry.id)
+        entry.status = 'installed'
+        entry.modIds = modIds
+        entry.copiedFolders = copiedFolders
+      } catch (e) {
+        entry.status = 'failed'
+        entry.error = e.message
+      }
+      entry.updatedAt = new Date().toISOString()
+      changed = true
+    }
+    if (changed) writeQueue(s, queue)
+  })
+}
+setInterval(() => { for (const s of allServers()) reconcileDownloads(s) }, 15000)
 
 // Post-download bookkeeping for one Workshop item: copy its mod folders into the mounted
 // workshop path + the server's mods dir, and register it (and any mod IDs it contains) in the ini.
@@ -943,11 +1008,17 @@ app.post('/api/mods/install', (req, res) => {
   const s = srv(req)
   const { workshopId } = req.body
   if (!workshopId || !/^\d+$/.test(workshopId)) return res.status(400).json({ error: 'Invalid workshopId' })
-  steamcmdDownload(s, [workshopId], (err, stderr) => {
-    if (err) return res.status(500).json({ error: 'SteamCMD failed', detail: stderr })
-    const { modIds, copiedFolders } = registerInstalledMod(s, workshopId)
-    res.json({ success: true, workshopId, modIds, copiedFolders })
-  })
+  steamcmdDownload(s, [workshopId], 'single', null)
+  res.json({ success: true, workshopId, queued: true })
+})
+
+// Re-queues a previously failed download (single item or one item from a collection).
+app.post('/api/mods/retry', (req, res) => {
+  const s = srv(req)
+  const { workshopId } = req.body
+  if (!workshopId || !/^\d+$/.test(workshopId)) return res.status(400).json({ error: 'Invalid workshopId' })
+  steamcmdDownload(s, [workshopId], 'single', null)
+  res.json({ success: true, workshopId, queued: true })
 })
 
 // Fetches a Steam Workshop collection's member item IDs via the public
@@ -975,10 +1046,10 @@ function getCollectionChildren(collectionId, cb) {
   req.write(data); req.end()
 }
 
-// Installs every mod in a Workshop collection. Downloads all items in one SteamCMD run
-// (queued/progress is already visible via the existing /api/downloads log parser), then
-// registers each item once the batch completes. Runs in the background — responds as
-// soon as the collection is resolved so the client isn't stuck waiting on a long download.
+// Installs every mod in a Workshop collection. Downloads all items in one SteamCMD run,
+// queued and tracked the same way as a single-mod install (see steamcmdDownload /
+// reconcileDownloads) — responds as soon as the collection is resolved so the client isn't
+// stuck waiting on a long download; per-item progress and completion show up in the queue.
 app.post('/api/mods/install-collection', (req, res) => {
   const s = srv(req)
   const { collectionId } = req.body
@@ -986,14 +1057,8 @@ app.post('/api/mods/install-collection', (req, res) => {
   getCollectionChildren(collectionId, (err, workshopIds) => {
     if (err) return res.status(502).json({ error: 'Could not read collection', detail: err.message })
     if (!workshopIds.length) return res.status(400).json({ error: 'Collection is empty' })
+    steamcmdDownload(s, workshopIds, 'collection', collectionId)
     res.json({ success: true, collectionId, workshopIds, count: workshopIds.length })
-    steamcmdDownload(s, workshopIds, (dlErr) => {
-      if (dlErr) return console.error('[collection ' + collectionId + '] SteamCMD failed:', dlErr.message)
-      for (const id of workshopIds) {
-        try { registerInstalledMod(s, id) } catch (e) { console.error('[collection ' + collectionId + '] register ' + id + ' failed:', e.message) }
-      }
-      console.log('[collection ' + collectionId + '] installed ' + workshopIds.length + ' item(s) for ' + s.name)
-    })
   })
 })
 
@@ -1097,11 +1162,15 @@ app.get('/api/servertime', (req, res) => {
 
 // ===== WORKSHOP DOWNLOAD STATUS =====
 
+// `active` = live per-item progress parsed from the current log tail (byte-level %, while
+// still downloading). `queue` = the persisted record of everything ever requested for this
+// server (queued/installed/failed with timestamps) — this is what survives a manager restart
+// and is what the "Queued for Download" UI section actually renders from.
 app.get('/api/downloads', (req, res) => {
   const s = srv(req)
   exec('docker logs ' + s.container + ' --tail 2000', { maxBuffer: 8 * 1024 * 1024 }, (err, out, stderr) => {
     const lines = ((out || '') + '\n' + (stderr || '')).split('\n')
-    res.json({ active: parseDownloads(lines) })
+    res.json({ active: parseDownloads(lines), queue: readQueue(s).slice().reverse() })
   })
 })
 

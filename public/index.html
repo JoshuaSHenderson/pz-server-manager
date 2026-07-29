@@ -631,6 +631,13 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
     <div class="pane-head"><h1>Mods</h1><p>Steam Workshop content installed on the server</p></div>
     <div id="mods-msg"></div>
     <div id="download-banner"></div>
+    <div class="card" id="queue-card" style="display:none">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <div class="card-title" style="margin-bottom:0">Queued for Download</div>
+        <span id="queue-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap;margin-left:1rem"></span>
+      </div>
+      <div id="queue-table"></div>
+    </div>
     <div class="card">
       <div class="card-title">Install Mod</div>
       <div class="row">
@@ -1121,6 +1128,7 @@ function fetchDownloads() {
   fetch('/api/downloads').then(function(r) { return r.json() }).then(function(d) {
     activeDownloads = d.active || []
     renderDownloadBanner()
+    renderQueueTable(d.queue || [])
     renderModsTable(cachedMods)
   }).catch(function() {})
 }
@@ -1132,6 +1140,49 @@ function renderDownloadBanner() {
     return a.workshopId + (a.status === 'downloading' && a.total > 0 ? ' (' + a.pct + '%)' : ' queued')
   }).join(', ')
   banner.innerHTML = '<div class="msg msg-info" style="margin-bottom:.75rem"><strong>Workshop downloads in progress — do not restart.</strong><br><span style="font-size:.8rem;opacity:.8">Updating: ' + esc(items) + '</span></div>'
+}
+
+var STATUS_BADGE = {
+  queued: '<span style="color:#f5a623">⏳ Queued</span>',
+  installed: '<span style="color:#2ecc71">✓ Installed</span>',
+  failed: '<span style="color:#e74c3c">✗ Failed</span>'
+}
+function renderQueueTable(queue) {
+  var card = document.getElementById('queue-card')
+  if (!queue.length) { card.style.display = 'none'; return }
+  card.style.display = ''
+  document.getElementById('queue-count').textContent = queue.length + ' recent'
+  var activeMap = {}
+  activeDownloads.forEach(function(a) { activeMap[a.workshopId] = a })
+  var rows = queue.slice(0, 50).map(function(e) {
+    var live = activeMap[e.id]
+    var statusHtml = STATUS_BADGE[e.status] || esc(e.status)
+    if (e.status === 'queued' && live && live.status === 'downloading' && live.total > 0) {
+      statusHtml = '<span style="color:#f5a623">⬇ Downloading ' + live.pct + '%</span>'
+    }
+    var source = e.source === 'collection' ? 'Collection #' + esc(e.collectionId) : 'Single mod'
+    var when = new Date(e.updatedAt || e.queuedAt).toLocaleString()
+    var retryBtn = e.status === 'failed'
+      ? '<button class="btn-secondary btn-sm" onclick="retryDownload(\'' + e.id + '\')">Retry</button>'
+      : ''
+    var errNote = e.error ? '<br><span style="font-size:.75rem;color:var(--muted)">' + esc(e.error) + '</span>' : ''
+    return '<tr>' +
+      '<td><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + e.id + '" target="_blank" class="mono">' + e.id + '</a></td>' +
+      '<td>' + statusHtml + errNote + '</td>' +
+      '<td class="text-muted" style="font-size:.8rem">' + source + '</td>' +
+      '<td class="text-muted" style="font-size:.75rem">' + when + '</td>' +
+      '<td>' + retryBtn + '</td>' +
+      '</tr>'
+  }).join('')
+  document.getElementById('queue-table').innerHTML =
+    '<table><thead><tr><th>Workshop ID</th><th>Status</th><th>Source</th><th>Updated</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+}
+
+function retryDownload(workshopId) {
+  fetch('/api/mods/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workshopId: workshopId }) })
+    .then(function(r) { return r.json() })
+    .then(function() { fetchDownloads() })
+    .catch(function() {})
 }
 
 function fetchMods() {
@@ -1171,14 +1222,14 @@ function installMod() {
   var btn = document.getElementById('install-btn')
   btn.disabled = true
   btn.innerHTML = '<span class="spin"></span> Installing...'
-  showMsg('mods-msg', 'Downloading ' + workshopId + ' via SteamCMD — may take a minute...', 'info', 0)
+  showMsg('mods-msg', 'Queuing ' + workshopId + '...', 'info', 0)
   fetch('/api/mods/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workshopId: workshopId }) })
     .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
     .then(function(x) {
       if (!x.ok) throw new Error(x.d.error || 'Install failed')
       document.getElementById('workshop-input').value = ''
-      showMsg('mods-msg', 'Installed ' + workshopId + ' (' + (x.d.modIds.join(', ') || 'no mod IDs') + '). Restart to apply.', 'success', 8000)
-      fetchMods()
+      showMsg('mods-msg', 'Queued ' + workshopId + ' for download — see "Queued for Download" below. Restart the server once it shows Installed.', 'success', 8000)
+      fetchDownloads()
     })
     .catch(function(e) { showMsg('mods-msg', 'Failed: ' + e.message, 'error', 0) })
     .finally(function() { btn.disabled = false; btn.textContent = 'Install' })
@@ -1198,7 +1249,8 @@ function installCollection() {
     .then(function(x) {
       if (!x.ok) throw new Error(x.d.error || 'Install failed')
       document.getElementById('collection-input').value = ''
-      showMsg('mods-msg', 'Queued ' + x.d.count + ' mod(s) from the collection — downloading in the background, watch progress below.', 'success', 8000)
+      showMsg('mods-msg', 'Queued ' + x.d.count + ' mod(s) from the collection — see "Queued for Download" below.', 'success', 8000)
+      fetchDownloads()
     })
     .catch(function(e) { showMsg('mods-msg', 'Failed: ' + e.message, 'error', 0) })
     .finally(function() { btn.disabled = false; btn.textContent = 'Install All' })
