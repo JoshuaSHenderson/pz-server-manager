@@ -853,8 +853,8 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
             <input type="checkbox" id="discord-richcard" onchange="toggleDiscordMode()"> Use rich card embed
           </label>
           <div id="discord-richcard-fields" style="display:none;margin-bottom:.5rem">
-            <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Server IP:Port</label>
-            <input type="text" id="discord-serverip" style="width:100%;font-family:var(--font-mono)" placeholder="137.103.3.3:16261">
+            <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Connect &amp; Version (auto-detected)</label>
+            <div id="discord-detected" style="font-family:var(--font-mono);font-size:.85rem;color:var(--muted)">detecting...</div>
           </div>
           <div id="discord-template-fields">
             <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Message Template</label>
@@ -1501,11 +1501,24 @@ function fetchNotifSettings() {
     document.getElementById('discord-enabled').checked = !!disc.enabled
     document.getElementById('discord-webhook').value = disc.webhookUrl || ''
     document.getElementById('discord-richcard').checked = !!disc.richCard
-    document.getElementById('discord-serverip').value = disc.serverIp || ''
     document.getElementById('discord-template').value = disc.template || ''
     document.getElementById('discord-messageid').value = disc.messageId || ''
     toggleDiscordMode()
+    fetchDetectedInfo()
   }).catch(function() {})
+}
+
+function fetchDetectedInfo() {
+  var el = document.getElementById('discord-detected')
+  if (!el) return
+  fetch('/api/discord/detected').then(function(r) { return r.json() }).then(function(d) {
+    var parts = []
+    if (d.externalIp && d.port) parts.push(d.externalIp + ':' + d.port)
+    else if (d.externalIp) parts.push(d.externalIp + ' (port not set)')
+    else parts.push('(detecting external IP...)')
+    if (d.version) parts.push('v' + d.version)
+    el.textContent = parts.join(' · ')
+  }).catch(function() { el.textContent = '(unavailable)' })
 }
 
 function saveNotifSettings(cb) {
@@ -1530,7 +1543,6 @@ function saveNotifSettings(cb) {
       webhookUrl: document.getElementById('discord-webhook').value.trim(),
       messageId: document.getElementById('discord-messageid').value.trim(),
       richCard: document.getElementById('discord-richcard').checked,
-      serverIp: document.getElementById('discord-serverip').value.trim(),
       template: document.getElementById('discord-template').value
     }
   }

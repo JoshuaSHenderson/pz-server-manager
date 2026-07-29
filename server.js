@@ -216,7 +216,6 @@ const DEFAULT_NOTIF = {
     webhookUrl: '',
     messageId: '',
     richCard: false,
-    serverIp: '',
     template: 'Project Zomboid Server: <ZomboidServerStats> | Last updated: <LastUpdated>'
   }
 }
@@ -270,7 +269,40 @@ function parseWebhookUrl(url) {
   return m ? { id: m[1], token: m[2] } : null
 }
 
-// Discord card shows every managed server's status
+// --- External IP detection (cached — this box's WAN IP rarely changes) ---
+let externalIpCache = { ip: '', at: 0 }
+const EXTERNAL_IP_TTL = 15 * 60 * 1000
+function getExternalIp(cb) {
+  if (externalIpCache.ip && Date.now() - externalIpCache.at < EXTERNAL_IP_TTL) return cb(externalIpCache.ip)
+  const req = https.request({ hostname: 'api.ipify.org', path: '/', method: 'GET' }, r => {
+    let out = ''
+    r.on('data', c => out += c)
+    r.on('end', () => {
+      const ip = out.trim()
+      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) externalIpCache = { ip, at: Date.now() }
+      cb(externalIpCache.ip)
+    })
+  })
+  req.on('error', () => cb(externalIpCache.ip)) // fall back to last-known value on error
+  req.end()
+}
+
+// --- Running game version (cached per server — parsed from the server's own startup log) ---
+const versionCache = {} // [serverId] = { version, at }
+const VERSION_TTL = 5 * 60 * 1000
+function getServerVersion(s, cb) {
+  const cached = versionCache[s.id]
+  if (cached && Date.now() - cached.at < VERSION_TTL) return cb(cached.version)
+  exec('docker logs ' + s.container + ' --tail 3000 2>&1', { maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
+    const m = (out || '').match(/[^\s]*\bversion=(\S+)\s+demo=/)
+    const version = m ? m[1] : (cached ? cached.version : '')
+    versionCache[s.id] = { version, at: Date.now() }
+    cb(version)
+  })
+}
+
+// Discord card shows every managed server's status. External IP and each server's game
+// version are auto-detected (cached) rather than requiring manual entry.
 function updateDiscordStatus(cb) {
   const cfg = readNotifConfig()
   if (!cfg.discord || !cfg.discord.enabled || !cfg.discord.webhookUrl) return cb && cb()
@@ -278,61 +310,78 @@ function updateDiscordStatus(cb) {
   if (!wh) return cb && cb()
   const servers = allServers()
   const names = servers.map(s => s.container).join(' ')
-  exec('docker inspect ' + names + ' --format "{{.Name}}|{{.State.Status}}|{{.State.StartedAt}}"', (err, out) => {
-    const states = {}
-    for (const line of (out || '').trim().split('\n')) {
-      const [name, status, startedAt] = line.replace(/^\//, '').split('|')
-      states[name] = { status, startedAt }
-    }
-    const anyOnline = servers.some(s => (states[s.container] || {}).status === 'running')
-    let body
-    if (cfg.discord.richCard) {
-      const fields = []
-      for (const s of servers) {
-        const st = states[s.container] || {}
-        const isOnline = st.status === 'running'
-        let uptime = '—'
-        if (isOnline && st.startedAt) {
-          const ms = Date.now() - new Date(st.startedAt).getTime()
-          const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000)
-          uptime = h > 0 ? h + 'h ' + m + 'm' : m + 'm'
-        }
-        let title = s.name, modCount = '—'
-        try {
-          title = getIniValue(s, 'PublicName') || s.name
-          modCount = String(getIniList(s, 'WorkshopItems').length)
-        } catch {}
-        const players = isOnline ? onlinePlayersFor(s) : []
-        let value = (isOnline ? '🟢 **Online**' : '🔴 **Offline**') + ' · Uptime ' + uptime + ' · ' + modCount + ' mods'
-        value += '\n👥 ' + players.length + ' online' + (players.length ? ': ' + players.slice(0, 15).join(', ') + (players.length > 15 ? ', …' : '') : '')
-        fields.push({ name: title, value, inline: false })
+  getExternalIp(externalIp => {
+    exec('docker inspect ' + names + ' --format "{{.Name}}|{{.State.Status}}|{{.State.StartedAt}}"', (err, out) => {
+      const states = {}
+      for (const line of (out || '').trim().split('\n')) {
+        const [name, status, startedAt] = line.replace(/^\//, '').split('|')
+        states[name] = { status, startedAt }
       }
-      if (cfg.discord.serverIp) fields.push({ name: 'Connect', value: '`' + cfg.discord.serverIp + '`', inline: false })
-      body = { embeds: [{ title: 'Project Zomboid Servers', color: anyOnline ? 5763719 : 15548997, fields, timestamp: new Date().toISOString() }] }
-    } else {
-      const stats = servers.map(s => {
-        const isOnline = (states[s.container] || {}).status === 'running'
-        const n = isOnline ? onlinePlayersFor(s).length : 0
-        return s.name + ' ' + (isOnline ? '🟢 ' + n + ' online' : '🔴')
-      }).join(' | ')
-      const template = cfg.discord.template || 'Project Zomboid Server: <ZomboidServerStats>'
-      const content = template
-        .replace('<ZomboidServerStats>', stats)
-        .replace('<LastUpdated>', new Date().toUTCString())
-      body = { content }
-    }
-    const save = id => { cfg.discord.messageId = id; writeNotifConfig(cfg) }
-    if (cfg.discord.messageId) {
-      discordRequest('PATCH', '/webhooks/' + wh.id + '/' + wh.token + '/messages/' + cfg.discord.messageId, body, (e, data, status) => {
-        if (status === 404) { save(''); updateDiscordStatus(cb) }
-        else cb && cb(null, data)
-      })
-    } else {
-      discordRequest('POST', '/webhooks/' + wh.id + '/' + wh.token + '?wait=true', body, (e, data, status) => {
-        if (data && data.id) save(data.id)
-        cb && cb(null, data)
-      })
-    }
+      const anyOnline = servers.some(s => (states[s.container] || {}).status === 'running')
+
+      let pending = servers.length || 1
+      const versions = {}
+      const done = () => sendCard(versions)
+      if (!servers.length) return done()
+      for (const s of servers) {
+        getServerVersion(s, v => { versions[s.id] = v; if (--pending <= 0) done() })
+      }
+
+      function sendCard(versions) {
+        let body
+        if (cfg.discord.richCard) {
+          const fields = []
+          for (const s of servers) {
+            const st = states[s.container] || {}
+            const isOnline = st.status === 'running'
+            let uptime = '—'
+            if (isOnline && st.startedAt) {
+              const ms = Date.now() - new Date(st.startedAt).getTime()
+              const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000)
+              uptime = h > 0 ? h + 'h ' + m + 'm' : m + 'm'
+            }
+            let title = s.name, modCount = '—', port = ''
+            try {
+              title = getIniValue(s, 'PublicName') || s.name
+              modCount = String(getIniList(s, 'WorkshopItems').length)
+              port = getIniValue(s, 'DefaultPort', '')
+            } catch {}
+            const players = isOnline ? onlinePlayersFor(s) : []
+            const version = versions[s.id]
+            let value = (isOnline ? '🟢 **Online**' : '🔴 **Offline**') + ' · Uptime ' + uptime + ' · ' + modCount + ' mods'
+            if (version) value += ' · v' + version
+            if (externalIp && port) value += '\n🔌 `' + externalIp + ':' + port + '`'
+            value += '\n👥 ' + players.length + ' online' + (players.length ? ': ' + players.slice(0, 15).join(', ') + (players.length > 15 ? ', …' : '') : '')
+            fields.push({ name: title, value, inline: false })
+          }
+          body = { embeds: [{ title: 'Project Zomboid Servers', color: anyOnline ? 5763719 : 15548997, fields, timestamp: new Date().toISOString() }] }
+        } else {
+          const stats = servers.map(s => {
+            const isOnline = (states[s.container] || {}).status === 'running'
+            const n = isOnline ? onlinePlayersFor(s).length : 0
+            const version = versions[s.id]
+            return s.name + (version ? ' v' + version : '') + ' ' + (isOnline ? '🟢 ' + n + ' online' : '🔴')
+          }).join(' | ')
+          const template = cfg.discord.template || 'Project Zomboid Server: <ZomboidServerStats>'
+          const content = template
+            .replace('<ZomboidServerStats>', stats)
+            .replace('<LastUpdated>', new Date().toUTCString())
+          body = { content }
+        }
+        const save = id => { cfg.discord.messageId = id; writeNotifConfig(cfg) }
+        if (cfg.discord.messageId) {
+          discordRequest('PATCH', '/webhooks/' + wh.id + '/' + wh.token + '/messages/' + cfg.discord.messageId, body, (e, data, status) => {
+            if (status === 404) { save(''); updateDiscordStatus(cb) }
+            else cb && cb(null, data)
+          })
+        } else {
+          discordRequest('POST', '/webhooks/' + wh.id + '/' + wh.token + '?wait=true', body, (e, data, status) => {
+            if (data && data.id) save(data.id)
+            cb && cb(null, data)
+          })
+        }
+      }
+    })
   })
 }
 
@@ -1052,6 +1101,19 @@ app.post('/api/notifications/test', (req, res) => {
 
 app.post('/api/discord/update', (req, res) => {
   updateDiscordStatus((err, data) => res.json({ success: !err, data, error: err ? err.message : null }))
+})
+
+// What the Discord card will actually show for "connect" + version — surfaced in the UI
+// so it's clear these are auto-detected, not manually entered.
+app.get('/api/discord/detected', (req, res) => {
+  const s = srv(req)
+  getExternalIp(ip => {
+    getServerVersion(s, version => {
+      let port = ''
+      try { port = getIniValue(s, 'DefaultPort', '') } catch {}
+      res.json({ externalIp: ip, port, version })
+    })
+  })
 })
 
 // ===== SCHEDULE =====
