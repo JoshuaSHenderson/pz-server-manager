@@ -630,36 +630,66 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
   <div id="tab-mods" class="tab-pane">
     <div class="pane-head"><h1>Mods</h1><p>Steam Workshop content installed on the server</p></div>
     <div id="mods-msg"></div>
+
+    <!-- Compact activity strip: only visible while something is actually downloading -->
     <div id="download-banner"></div>
-    <div class="card" id="queue-card" style="display:none">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
-        <div class="card-title" style="margin-bottom:0">Queued for Download</div>
-        <span id="queue-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap;margin-left:1rem"></span>
-      </div>
-      <div id="queue-table"></div>
-    </div>
+
+    <!-- Add content -->
     <div class="card">
-      <div class="card-title">Install Mod</div>
+      <div class="card-title">Add Content</div>
+      <div class="row" style="margin-bottom:.6rem">
+        <input type="text" id="workshop-input" placeholder="Workshop mod ID or URL">
+        <button class="btn-primary" id="install-btn" onclick="installMod()">Add Mod</button>
+      </div>
       <div class="row">
-        <input type="text" id="workshop-input" placeholder="Steam Workshop ID (e.g. 2878374713)">
-        <button class="btn-primary" id="install-btn" onclick="installMod()">Install</button>
+        <input type="text" id="collection-input" placeholder="Workshop collection ID or URL">
+        <button class="btn-primary" id="install-collection-btn" onclick="addCollection()">Add Collection</button>
       </div>
-      <p style="margin-top:.5rem;font-size:.78rem;color:var(--muted)">Workshop URL: steamcommunity.com/sharedfiles/filedetails/?id=XXXXXXXXX</p>
+      <p style="margin-top:.6rem;font-size:.78rem;color:var(--muted)">Paste an ID or a full <span class="mono">steamcommunity.com/sharedfiles/filedetails/?id=…</span> URL. Collections are tracked below and expand nested collections automatically.</p>
     </div>
+
+    <!-- Tracked collections -->
     <div class="card">
-      <div class="card-title">Install Collection</div>
-      <div class="row">
-        <input type="text" id="collection-input" placeholder="Steam Workshop Collection ID">
-        <button class="btn-primary" id="install-collection-btn" onclick="installCollection()">Install All</button>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;gap:1rem;flex-wrap:wrap">
+        <div class="card-title" style="margin-bottom:0">Collections</div>
+        <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:.45rem;cursor:pointer;font-size:.8rem;color:var(--muted)">
+            <input type="checkbox" id="autosync-enabled" onchange="saveAutoSync()"> Auto-sync every
+          </label>
+          <select id="autosync-interval" class="server-select" style="width:auto;margin:0;padding:.3rem .5rem;font-size:.8rem" onchange="saveAutoSync()">
+            <option value="6">6h</option>
+            <option value="12">12h</option>
+            <option value="24" selected>24h</option>
+            <option value="48">48h</option>
+            <option value="168">7d</option>
+          </select>
+          <button class="btn-secondary btn-sm" onclick="syncAllCollections()">Sync All Now</button>
+        </div>
       </div>
-      <p style="margin-top:.5rem;font-size:.78rem;color:var(--muted)">Downloads every mod in the collection. Progress shows per-item below; installs can take a while for large collections.</p>
+      <div id="collections-table"></div>
     </div>
+
+    <!-- Installed mods -->
     <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;gap:1rem;flex-wrap:wrap">
         <div class="card-title" style="margin-bottom:0">Installed Mods</div>
-        <span id="mod-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap;margin-left:1rem"></span>
+        <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap">
+          <input type="text" id="mod-filter" placeholder="Filter..." oninput="renderModsTable(cachedMods)" style="width:170px;padding:.35rem .55rem;font-size:.82rem">
+          <span id="mod-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap"></span>
+        </div>
       </div>
+      <div id="mods-problems"></div>
       <div id="mods-table"></div>
+    </div>
+
+    <!-- Recent download activity (collapsed by default — no longer in the way) -->
+    <div class="card">
+      <details id="queue-details">
+        <summary style="cursor:pointer;font-size:.9rem;color:var(--muted)">
+          Download Activity <span id="queue-count" class="mono" style="font-size:.78rem"></span>
+        </summary>
+        <div id="queue-table" style="margin-top:1rem"></div>
+      </details>
     </div>
   </div>
 
@@ -958,7 +988,7 @@ function switchTab(tab) {
   document.getElementById('tab-' + tab).classList.add('active')
   if (tab === 'logs') startLog()
   else stopLog()
-  if (tab === 'mods') { fetchMods(); startDownloadPoll() }
+  if (tab === 'mods') { fetchMods(); fetchCollections(); startDownloadPoll() }
   if (tab === 'players') fetchPlayers()
   if (tab === 'settings') fetchNotifSettings()
   if (tab === 'config') { fetchConfig(); fetchSandbox() }
@@ -1133,46 +1163,57 @@ function fetchDownloads() {
   }).catch(function() {})
 }
 
+// Compact one-line strip while downloads are live; hidden entirely when idle.
 function renderDownloadBanner() {
   var banner = document.getElementById('download-banner')
   if (!activeDownloads.length) { banner.innerHTML = ''; return }
-  var items = activeDownloads.map(function(a) {
-    return a.workshopId + (a.status === 'downloading' && a.total > 0 ? ' (' + a.pct + '%)' : ' queued')
-  }).join(', ')
-  banner.innerHTML = '<div class="msg msg-info" style="margin-bottom:.75rem"><strong>Workshop downloads in progress — do not restart.</strong><br><span style="font-size:.8rem;opacity:.8">Updating: ' + esc(items) + '</span></div>'
+  var withPct = activeDownloads.filter(function(a) { return a.status === 'downloading' && a.total > 0 })
+  var pct = withPct.length
+    ? Math.round(withPct.reduce(function(sum, a) { return sum + a.pct }, 0) / withPct.length)
+    : null
+  banner.innerHTML = '<div class="msg msg-info" style="margin-bottom:.75rem;display:flex;align-items:center;gap:.6rem">' +
+    '<span class="spin"></span>' +
+    '<span><strong>' + activeDownloads.length + ' mod' + (activeDownloads.length > 1 ? 's' : '') + ' downloading' +
+    (pct !== null ? ' — ' + pct + '% avg' : '') + '.</strong> ' +
+    '<span style="font-size:.8rem;opacity:.85">Don\'t restart the server until this finishes.</span></span>' +
+    '</div>'
 }
 
 var STATUS_BADGE = {
-  queued: '<span style="color:#f5a623">⏳ Queued</span>',
-  installed: '<span style="color:#2ecc71">✓ Installed</span>',
-  failed: '<span style="color:#e74c3c">✗ Failed</span>'
+  queued: '<span style="color:#f5a623">Queued</span>',
+  installed: '<span style="color:#2ecc71">Installed</span>',
+  failed: '<span style="color:#e74c3c">Failed</span>',
+  collection: '<span style="color:#60a5fa">Collection (expanded)</span>'
 }
 function renderQueueTable(queue) {
-  var card = document.getElementById('queue-card')
-  if (!queue.length) { card.style.display = 'none'; return }
-  card.style.display = ''
-  document.getElementById('queue-count').textContent = queue.length + ' recent'
+  var countEl = document.getElementById('queue-count')
+  if (!queue.length) {
+    countEl.textContent = '(nothing yet)'
+    document.getElementById('queue-table').innerHTML = '<div class="empty">No download activity recorded</div>'
+    return
+  }
+  var pending = queue.filter(function(e) { return e.status === 'queued' }).length
+  var failed = queue.filter(function(e) { return e.status === 'failed' }).length
+  countEl.textContent = '(' + queue.length + ' recent' + (pending ? ', ' + pending + ' in progress' : '') + (failed ? ', ' + failed + ' failed' : '') + ')'
   var activeMap = {}
   activeDownloads.forEach(function(a) { activeMap[a.workshopId] = a })
-  var rows = queue.slice(0, 50).map(function(e) {
+  var rows = queue.slice(0, 60).map(function(e) {
     var live = activeMap[e.id]
     var statusHtml = STATUS_BADGE[e.status] || esc(e.status)
     if (e.status === 'queued' && live && live.status === 'downloading' && live.total > 0) {
-      statusHtml = '<span style="color:#f5a623">⬇ Downloading ' + live.pct + '%</span>'
+      statusHtml = '<span style="color:#60a5fa">Downloading ' + live.pct + '%</span>'
     }
-    var source = e.source === 'collection' ? 'Collection #' + esc(e.collectionId) : 'Single mod'
+    var source = e.source === 'collection' ? 'Collection ' + esc(e.collectionId || '') : 'Single'
     var when = new Date(e.updatedAt || e.queuedAt).toLocaleString()
     var retryBtn = e.status === 'failed'
-      ? '<button class="btn-secondary btn-sm" onclick="retryDownload(\'' + e.id + '\')">Retry</button>'
-      : ''
-    var errNote = e.error ? '<br><span style="font-size:.75rem;color:var(--muted)">' + esc(e.error) + '</span>' : ''
+      ? '<button class="btn-secondary btn-sm" onclick="retryDownload(\'' + e.id + '\')">Retry</button>' : ''
+    var errNote = e.error ? '<br><span style="font-size:.72rem;color:var(--muted)">' + esc(e.error) + '</span>' : ''
     return '<tr>' +
       '<td><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + e.id + '" target="_blank" class="mono">' + e.id + '</a></td>' +
       '<td>' + statusHtml + errNote + '</td>' +
-      '<td class="text-muted" style="font-size:.8rem">' + source + '</td>' +
-      '<td class="text-muted" style="font-size:.75rem">' + when + '</td>' +
-      '<td>' + retryBtn + '</td>' +
-      '</tr>'
+      '<td class="text-muted" style="font-size:.78rem">' + source + '</td>' +
+      '<td class="text-muted" style="font-size:.74rem">' + when + '</td>' +
+      '<td>' + retryBtn + '</td></tr>'
   }).join('')
   document.getElementById('queue-table').innerHTML =
     '<table><thead><tr><th>Workshop ID</th><th>Status</th><th>Source</th><th>Updated</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
@@ -1181,7 +1222,7 @@ function renderQueueTable(queue) {
 function retryDownload(workshopId) {
   fetch('/api/mods/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workshopId: workshopId }) })
     .then(function(r) { return r.json() })
-    .then(function() { fetchDownloads() })
+    .then(function() { showMsg('mods-msg', 'Re-queued ' + workshopId + '.', 'info', 4000); fetchDownloads() })
     .catch(function() {})
 }
 
@@ -1189,71 +1230,221 @@ function fetchMods() {
   document.getElementById('mods-table').innerHTML = '<div class="empty">Loading...</div>'
   fetch('/api/mods').then(function(r) { return r.json() }).then(function(d) {
     cachedMods = d.mods || []
-    document.getElementById('mod-count').textContent = cachedMods.length + ' installed'
     renderModsTable(cachedMods)
   })
 }
 
 function renderModsTable(mods) {
-  if (!mods.length) {
-    document.getElementById('mods-table').innerHTML = '<div class="empty">No mods installed</div>'
+  var problems = mods.filter(function(m) { return m.status === 'missing' })
+  var probEl = document.getElementById('mods-problems')
+  probEl.innerHTML = problems.length
+    ? '<div class="msg msg-error" style="margin-bottom:1rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">' +
+      '<span><strong>' + problems.length + ' mod' + (problems.length > 1 ? 's are' : ' is') + ' registered but missing files.</strong> ' +
+      '<span style="font-size:.8rem;opacity:.85">The server can\'t load these. Repair re-downloads them and expands any that turn out to be collections.</span></span>' +
+      '<button class="btn-primary btn-sm" onclick="repairMods()">Repair All</button></div>'
+    : ''
+
+  var filter = (document.getElementById('mod-filter') || {}).value || ''
+  var f = filter.trim().toLowerCase()
+  var shown = f ? mods.filter(function(m) {
+    return (m.title || '').toLowerCase().indexOf(f) !== -1 ||
+           m.workshopId.indexOf(f) !== -1 ||
+           m.modIds.join(' ').toLowerCase().indexOf(f) !== -1
+  }) : mods
+
+  var okCount = mods.filter(function(m) { return m.status === 'ok' }).length
+  document.getElementById('mod-count').textContent =
+    okCount + ' installed' + (problems.length ? ' · ' + problems.length + ' broken' : '') + (f ? ' · ' + shown.length + ' shown' : '')
+
+  if (!shown.length) {
+    document.getElementById('mods-table').innerHTML = '<div class="empty">' + (f ? 'No mods match "' + esc(filter) + '"' : 'No mods installed') + '</div>'
     return
   }
+
   var dlMap = {}
   activeDownloads.forEach(function(a) { dlMap[a.workshopId] = a })
-  var rows = mods.map(function(m) {
+
+  var rows = shown.map(function(m) {
     var dl = dlMap[m.workshopId]
-    var dlBadge = dl
-      ? '<span class="badge" style="background:#1a2e4a;color:#60a5fa;margin-left:.4rem">' + (dl.status === 'downloading' && dl.total > 0 ? '&#8595; ' + dl.pct + '%' : '&#8595; queued') + '</span>'
-      : ''
+    var statusHtml
+    if (dl) {
+      statusHtml = '<span style="color:#60a5fa">' + (dl.status === 'downloading' && dl.total > 0 ? 'Downloading ' + dl.pct + '%' : 'Queued') + '</span>'
+    } else if (m.status === 'missing') {
+      statusHtml = '<span style="color:#e74c3c">Missing files</span>' +
+        '<br><button class="btn-secondary btn-sm" style="margin-top:.3rem" onclick="retryDownload(\'' + m.workshopId + '\')">Re-download</button>'
+    } else if (m.status === 'collection') {
+      statusHtml = '<span style="color:#60a5fa">Collection</span>'
+    } else {
+      statusHtml = '<span style="color:#2ecc71">OK</span>'
+    }
+    var name = m.title
+      ? esc(m.title)
+      : '<span class="text-muted">(unknown title)</span>'
+    var detail = m.modIds.length
+      ? '<span style="font-size:.75rem;color:var(--muted)">' + esc(m.modIds.join(', ')) + '</span>'
+      : '<span style="font-size:.75rem;color:var(--muted)">—</span>'
     return '<tr>' +
-      '<td><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + m.workshopId + '" target="_blank" class="mono">' + m.workshopId + '</a>' + dlBadge + '</td>' +
-      '<td style="color:var(--muted);font-size:.78rem;max-width:300px;word-break:break-all">' + (m.modIds.join(', ') || '—') + '</td>' +
-      '<td style="color:var(--muted);font-size:.78rem;max-width:200px;word-break:break-all">' + (m.modFolders.join(', ') || '—') + '</td>' +
+      '<td><div>' + name + '</div>' +
+        '<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + m.workshopId + '" target="_blank" class="mono" style="font-size:.72rem;opacity:.7">' + m.workshopId + '</a></td>' +
+      '<td>' + detail + '</td>' +
+      '<td>' + statusHtml + '</td>' +
       '<td><button class="btn-danger btn-sm" onclick="removeMod(\'' + m.workshopId + '\')">Remove</button></td>' +
       '</tr>'
   }).join('')
-  document.getElementById('mods-table').innerHTML = '<table><thead><tr><th>Workshop ID</th><th>Mod IDs</th><th>Folders</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+  document.getElementById('mods-table').innerHTML =
+    '<table><thead><tr><th>Mod</th><th>Mod IDs</th><th>Status</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+}
+
+function repairMods() {
+  showMsg('mods-msg', 'Repairing — re-downloading missing mods...', 'info', 0)
+  fetch('/api/mods/repair', { method: 'POST' })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      var bits = []
+      if (d.repaired) bits.push('re-queued ' + d.repaired + ' mod(s)')
+      if (d.collections) bits.push('expanded ' + d.collections + ' nested collection(s)')
+      showMsg('mods-msg', bits.length ? 'Repair started: ' + bits.join(', ') + '.' : 'Nothing to repair.', 'success', 8000)
+      fetchDownloads(); fetchMods()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Repair failed: ' + e.message, 'error', 0) })
+}
+
+// Accepts a bare ID or a full Workshop URL.
+function parseWorkshopId(raw) {
+  var m = String(raw || '').match(/(\d{6,})/)
+  return m ? m[1] : ''
 }
 
 function installMod() {
-  var workshopId = document.getElementById('workshop-input').value.trim()
-  if (!workshopId) return
+  var workshopId = parseWorkshopId(document.getElementById('workshop-input').value)
+  if (!workshopId) return showMsg('mods-msg', 'Enter a Workshop mod ID or URL.', 'error', 4000)
   var btn = document.getElementById('install-btn')
   btn.disabled = true
-  btn.innerHTML = '<span class="spin"></span> Installing...'
-  showMsg('mods-msg', 'Queuing ' + workshopId + '...', 'info', 0)
+  btn.innerHTML = '<span class="spin"></span> Adding...'
   fetch('/api/mods/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workshopId: workshopId }) })
     .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
     .then(function(x) {
       if (!x.ok) throw new Error(x.d.error || 'Install failed')
       document.getElementById('workshop-input').value = ''
-      showMsg('mods-msg', 'Queued ' + workshopId + ' for download — see "Queued for Download" below. Restart the server once it shows Installed.', 'success', 8000)
+      showMsg('mods-msg', 'Queued ' + workshopId + '. It appears below once downloaded — restart the server to load it.', 'success', 8000)
       fetchDownloads()
     })
     .catch(function(e) { showMsg('mods-msg', 'Failed: ' + e.message, 'error', 0) })
-    .finally(function() { btn.disabled = false; btn.textContent = 'Install' })
+    .finally(function() { btn.disabled = false; btn.textContent = 'Add Mod' })
 }
 
-function installCollection() {
-  var raw = document.getElementById('collection-input').value.trim()
-  var m = raw.match(/(\d{5,})/)
-  var collectionId = m ? m[1] : raw
-  if (!collectionId) return
+function addCollection() {
+  var collectionId = parseWorkshopId(document.getElementById('collection-input').value)
+  if (!collectionId) return showMsg('mods-msg', 'Enter a Workshop collection ID or URL.', 'error', 4000)
   var btn = document.getElementById('install-collection-btn')
   btn.disabled = true
   btn.innerHTML = '<span class="spin"></span> Resolving...'
-  showMsg('mods-msg', 'Looking up collection ' + collectionId + '...', 'info', 0)
-  fetch('/api/mods/install-collection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ collectionId: collectionId }) })
+  showMsg('mods-msg', 'Resolving collection ' + collectionId + ' (including nested collections)...', 'info', 0)
+  fetch('/api/collections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ collectionId: collectionId }) })
     .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
     .then(function(x) {
-      if (!x.ok) throw new Error(x.d.error || 'Install failed')
+      if (!x.ok) throw new Error(x.d.error || 'Failed')
       document.getElementById('collection-input').value = ''
-      showMsg('mods-msg', 'Queued ' + x.d.count + ' mod(s) from the collection — see "Queued for Download" below.', 'success', 8000)
-      fetchDownloads()
+      var msg = 'Collection tracked: ' + x.d.total + ' mod(s) total, ' + x.d.queued + ' queued for download'
+      if (x.d.nested) msg += ' (' + x.d.nested + ' nested collection(s) expanded)'
+      showMsg('mods-msg', msg + '.', 'success', 9000)
+      fetchCollections(); fetchDownloads()
     })
     .catch(function(e) { showMsg('mods-msg', 'Failed: ' + e.message, 'error', 0) })
-    .finally(function() { btn.disabled = false; btn.textContent = 'Install All' })
+    .finally(function() { btn.disabled = false; btn.textContent = 'Add Collection' })
+}
+
+function fetchCollections() {
+  fetch('/api/collections').then(function(r) { return r.json() }).then(function(d) {
+    renderCollections(d.collections || [])
+  }).catch(function() {})
+  fetch('/api/collections/autosync').then(function(r) { return r.json() }).then(function(d) {
+    document.getElementById('autosync-enabled').checked = !!d.enabled
+    if (d.intervalHours) document.getElementById('autosync-interval').value = String(d.intervalHours)
+  }).catch(function() {})
+}
+
+function renderCollections(colls) {
+  if (!colls.length) {
+    document.getElementById('collections-table').innerHTML =
+      '<div class="empty">No collections tracked. Add one above to install and keep it in sync.</div>'
+    return
+  }
+  var rows = colls.map(function(c) {
+    var synced = c.lastSynced ? new Date(c.lastSynced).toLocaleString() : '—'
+    var health = c.missingCount > 0
+      ? '<span style="color:#e74c3c">' + c.installedCount + '/' + c.itemCount + '</span>'
+      : '<span style="color:#2ecc71">' + c.installedCount + '/' + c.itemCount + '</span>'
+    var nested = (c.nestedCollections && c.nestedCollections.length)
+      ? '<br><span style="font-size:.72rem;color:var(--muted)">' + c.nestedCollections.length + ' nested collection(s)</span>' : ''
+    return '<tr>' +
+      '<td><div>' + (c.title ? esc(c.title) : '<span class="text-muted">(unknown)</span>') + '</div>' +
+        '<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + c.id + '" target="_blank" class="mono" style="font-size:.72rem;opacity:.7">' + c.id + '</a>' + nested + '</td>' +
+      '<td>' + health + '<br><span style="font-size:.72rem;color:var(--muted)">installed</span></td>' +
+      '<td class="text-muted" style="font-size:.76rem">' + synced + '</td>' +
+      '<td style="white-space:nowrap">' +
+        '<button class="btn-secondary btn-sm" onclick="syncCollection(\'' + c.id + '\')">Sync</button> ' +
+        '<button class="btn-danger btn-sm" onclick="removeCollection(\'' + c.id + '\')">Remove</button>' +
+      '</td></tr>'
+  }).join('')
+  document.getElementById('collections-table').innerHTML =
+    '<table><thead><tr><th>Collection</th><th>Mods</th><th>Last Synced</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+}
+
+function syncCollection(id) {
+  showMsg('mods-msg', 'Syncing collection ' + id + '...', 'info', 0)
+  fetch('/api/collections/' + id + '/sync', { method: 'POST' })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok) throw new Error(x.d.error || 'Sync failed')
+      showMsg('mods-msg', x.d.queued
+        ? 'Sync queued ' + x.d.queued + ' new/missing mod(s).'
+        : 'Already up to date — all ' + x.d.total + ' mod(s) present.', 'success', 8000)
+      fetchCollections(); fetchDownloads()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Sync failed: ' + e.message, 'error', 0) })
+}
+
+function syncAllCollections() {
+  fetch('/api/collections').then(function(r) { return r.json() }).then(function(d) {
+    var colls = d.collections || []
+    if (!colls.length) return showMsg('mods-msg', 'No collections to sync.', 'info', 4000)
+    showMsg('mods-msg', 'Syncing ' + colls.length + ' collection(s)...', 'info', 0)
+    var done = 0, queued = 0
+    colls.forEach(function(c) {
+      fetch('/api/collections/' + c.id + '/sync', { method: 'POST' })
+        .then(function(r) { return r.json() })
+        .then(function(x) { queued += (x.queued || 0) })
+        .catch(function() {})
+        .finally(function() {
+          if (++done === colls.length) {
+            showMsg('mods-msg', queued ? 'Sync complete — queued ' + queued + ' new/missing mod(s).' : 'All collections already up to date.', 'success', 8000)
+            fetchCollections(); fetchDownloads()
+          }
+        })
+    })
+  })
+}
+
+function removeCollection(id) {
+  var removeMods = confirm('Stop tracking this collection.\n\nOK = also delete its mods (ones no other tracked collection uses)\nCancel = keep the mods installed')
+  fetch('/api/collections/' + id + '?removeMods=' + (removeMods ? 'true' : 'false'), { method: 'DELETE' })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      showMsg('mods-msg', 'Collection removed' + (d.removedMods ? ' along with ' + d.removedMods + ' mod(s)' : '') + '.', 'success', 6000)
+      fetchCollections(); fetchMods()
+    })
+}
+
+function saveAutoSync() {
+  var enabled = document.getElementById('autosync-enabled').checked
+  var intervalHours = parseInt(document.getElementById('autosync-interval').value)
+  fetch('/api/collections/autosync', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled, intervalHours: intervalHours }) })
+    .then(function(r) { return r.json() })
+    .then(function() {
+      showMsg('mods-msg', enabled ? 'Auto-sync on — checking every ' + intervalHours + 'h.' : 'Auto-sync off.', 'success', 4000)
+    })
+    .catch(function() {})
 }
 
 function removeMod(workshopId) {

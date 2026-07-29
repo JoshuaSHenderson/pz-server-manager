@@ -895,92 +895,184 @@ app.delete('/api/players/:username', (req, res) => {
 
 // ===== MODS =====
 
-app.get('/api/mods', (req, res) => {
-  const s = srv(req)
-  const workshopIds = getIniList(s, 'WorkshopItems')
-  const mods = workshopIds.map(wid => ({
-    workshopId: wid,
-    modIds: modIdsFromWorkshop(s, wid),
-    modFolders: modNamesFromWorkshop(s, wid),
-  }))
-  res.json({ mods })
-})
+// --- Steam Workshop API ---
+// Both endpoints below are public and need no API key.
+
+// Titles (and file size) for arbitrary Workshop item IDs. Batched; Steam accepts many per call.
+function steamFileDetails(ids, cb) {
+  if (!ids.length) return cb(null, {})
+  const form = { itemcount: ids.length }
+  ids.forEach((id, i) => { form['publishedfileids[' + i + ']'] = id })
+  const data = querystring.stringify(form)
+  const req = https.request({
+    hostname: 'api.steampowered.com',
+    path: '/ISteamRemoteStorage/GetPublishedFileDetails/v1/',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data) }
+  }, r => {
+    let out = ''
+    r.on('data', c => out += c)
+    r.on('end', () => {
+      try {
+        const files = (JSON.parse(out).response || {}).publishedfiledetails || []
+        const map = {}
+        for (const f of files) {
+          if (f.publishedfileid) map[f.publishedfileid] = { title: f.title || '', fileSize: parseInt(f.file_size) || 0, ok: f.result === 1 }
+        }
+        cb(null, map)
+      } catch (e) { cb(e) }
+    })
+  })
+  req.on('error', cb)
+  req.write(data); req.end()
+}
+
+// Child item IDs for one or more collections. Returns { collectionId: [childIds] } and only
+// includes entries that are genuinely collections (result 1 with children) — this is also how
+// we detect that a "mod" ID is really a nested collection.
+function steamCollectionDetails(ids, cb) {
+  if (!ids.length) return cb(null, {})
+  const form = { collectioncount: ids.length }
+  ids.forEach((id, i) => { form['publishedfileids[' + i + ']'] = id })
+  const data = querystring.stringify(form)
+  const req = https.request({
+    hostname: 'api.steampowered.com',
+    path: '/ISteamRemoteStorage/GetCollectionDetails/v1/',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data) }
+  }, r => {
+    let out = ''
+    r.on('data', c => out += c)
+    r.on('end', () => {
+      try {
+        const details = (JSON.parse(out).response || {}).collectiondetails || []
+        const map = {}
+        for (const c of details) {
+          const kids = (c.children || []).map(k => k.publishedfileid)
+          if (c.result === 1 && kids.length) map[c.publishedfileid] = kids
+        }
+        cb(null, map)
+      } catch (e) { cb(e) }
+    })
+  })
+  req.on('error', cb)
+  req.write(data); req.end()
+}
+
+function getCollectionChildren(collectionId, cb) {
+  steamCollectionDetails([collectionId], (err, map) => {
+    if (err) return cb(err)
+    const kids = map[collectionId]
+    if (!kids) return cb(new Error('Not a collection, or collection is empty'))
+    cb(null, kids)
+  })
+}
+
+// Recursively resolves a collection to its leaf (non-collection) Workshop item IDs.
+// A PZ collection frequently contains other collections — installing those IDs directly is
+// what previously produced "mods" that were really collection stubs with no game content.
+function resolveCollectionLeaves(collectionId, cb) {
+  const leaves = new Set()
+  const seen = new Set()
+  const nested = []
+  function walk(ids, depth, done) {
+    const todo = ids.filter(id => !seen.has(id))
+    todo.forEach(id => seen.add(id))
+    if (!todo.length || depth > 4) return done()
+    steamCollectionDetails(todo, (err, map) => {
+      if (err) return done(err)
+      const childIds = []
+      for (const id of todo) {
+        if (map[id]) { nested.push(id); childIds.push(...map[id]) }
+        else leaves.add(id)
+      }
+      if (!childIds.length) return done()
+      walk(childIds, depth + 1, done)
+    })
+  }
+  steamCollectionDetails([collectionId], (err, map) => {
+    if (err) return cb(err)
+    const top = map[collectionId]
+    if (!top) return cb(new Error('Not a collection, or collection is empty'))
+    seen.add(collectionId)
+    walk(top, 1, (e) => e ? cb(e) : cb(null, Array.from(leaves), nested))
+  })
+}
+
+// --- Workshop title cache (avoids re-hitting Steam on every page load) ---
+const titleCache = {} // id -> { title, at }
+const TITLE_TTL = 6 * 60 * 60 * 1000
+function getTitles(ids, cb) {
+  const now = Date.now()
+  const missing = ids.filter(id => !titleCache[id] || now - titleCache[id].at > TITLE_TTL)
+  const out = () => {
+    const map = {}
+    for (const id of ids) map[id] = (titleCache[id] || {}).title || ''
+    cb(map)
+  }
+  if (!missing.length) return out()
+  let pending = 0
+  const chunks = []
+  for (let i = 0; i < missing.length; i += 50) chunks.push(missing.slice(i, i + 50))
+  pending = chunks.length
+  for (const chunk of chunks) {
+    steamFileDetails(chunk, (err, map) => {
+      if (!err) for (const [id, d] of Object.entries(map)) titleCache[id] = { title: d.title, at: Date.now() }
+      if (--pending <= 0) out()
+    })
+  }
+}
+
+// --- Collections registry (persisted per server) ---
+// Tracks which collections were installed here so they can be listed, re-synced (to pick up
+// items added to the collection upstream), and removed.
+function collectionsPath(s) { return s.data + '/collections.json' }
+function readCollections(s) {
+  try { return JSON.parse(fs.readFileSync(collectionsPath(s), 'utf8')) } catch { return [] }
+}
+function writeCollections(s, list) {
+  try { fs.writeFileSync(collectionsPath(s), JSON.stringify(list, null, 2)) }
+  catch (e) { console.error('[collections] write failed:', e.message) }
+}
+function upsertCollection(s, entry) {
+  const list = readCollections(s)
+  const i = list.findIndex(c => c.id === entry.id)
+  if (i >= 0) list[i] = Object.assign(list[i], entry)
+  else list.push(entry)
+  writeCollections(s, list)
+}
 
 // --- Download queue (persisted — survives a mod-manager container restart) ---
-// One JSON array per server: { id, source: 'single'|'collection', collectionId, status:
-// 'queued'|'installed'|'failed', queuedAt, updatedAt, error, modIds, copiedFolders }
+// One JSON array per server: { id, source, collectionId, status: 'queued'|'installed'|'failed',
+// queuedAt, updatedAt, error, modIds, copiedFolders }
 function queuePath(s) { return s.data + '/download-queue.json' }
 function readQueue(s) {
   try { return JSON.parse(fs.readFileSync(queuePath(s), 'utf8')) } catch { return [] }
 }
 function writeQueue(s, queue) {
-  try { fs.writeFileSync(queuePath(s), JSON.stringify(queue.slice(-200), null, 2)) } catch (e) { console.error('[queue] write failed:', e.message) }
+  try { fs.writeFileSync(queuePath(s), JSON.stringify(queue.slice(-300), null, 2)) }
+  catch (e) { console.error('[queue] write failed:', e.message) }
 }
 function queueAdd(s, workshopIds, source, collectionId) {
   const queue = readQueue(s)
   const now = new Date().toISOString()
+  // Drop any prior terminal record for the same id so re-installs don't stack up duplicates.
+  const kept = queue.filter(e => !(workshopIds.includes(e.id) && e.status !== 'queued'))
   for (const id of workshopIds) {
-    queue.push({ id, source, collectionId: collectionId || null, status: 'queued', queuedAt: now, updatedAt: now })
+    if (kept.some(e => e.id === id && e.status === 'queued')) continue
+    kept.push({ id, source, collectionId: collectionId || null, status: 'queued', queuedAt: now, updatedAt: now })
   }
-  writeQueue(s, queue)
-}
-function queueUpdate(s, id, patch) {
-  const queue = readQueue(s)
-  const entry = queue.slice().reverse().find(e => e.id === id && e.status === 'queued')
-  if (entry) Object.assign(entry, patch, { updatedAt: new Date().toISOString() })
-  writeQueue(s, queue)
+  writeQueue(s, kept)
 }
 
-// Kicks off a SteamCMD download for one or more Workshop items and returns immediately —
-// runs via a *detached* `docker exec -d` inside the PZ server container itself, so the
-// download keeps running even if this manager process is restarted (e.g. redeployed) mid-way.
-// Completion is detected later by reconcileDownloads() polling docker logs + the queue file,
-// not by holding a callback on this process, which is what made prior downloads vanish
-// silently if the manager container was rebuilt while one was in flight.
-function steamcmdDownload(s, workshopIds, source, collectionId) {
-  queueAdd(s, workshopIds, source, collectionId)
-  const items = workshopIds.map(id => '+workshop_download_item 108600 ' + id).join(' ')
-  const cmd = 'docker exec -d ' + s.container + ' /home/steam/steamcmd/steamcmd.sh +force_install_dir /home/steam/pz-dedicated +login anonymous ' + items + ' +quit'
-  exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
-    if (err) {
-      console.error('[download] failed to start for ' + s.name + ':', stderr || err.message)
-      for (const id of workshopIds) queueUpdate(s, id, { status: 'failed', error: 'Could not start SteamCMD' })
-    }
-  })
+// True when this Workshop item has real, loadable mod content on disk.
+function hasModContent(s, workshopId) {
+  return modFolders(s, workshopId).length > 0
 }
 
-// Runs on an interval: reconciles the persisted queue against what SteamCMD's log actually
-// shows is still active. Anything that WAS queued and is no longer active gets registered
-// (mods copied + ini updated) and marked done — this is what actually finishes a download
-// that was kicked off by steamcmdDownload above, independent of which process started it.
-function reconcileDownloads(s) {
-  const queue = readQueue(s)
-  const pending = queue.filter(e => e.status === 'queued')
-  if (!pending.length) return
-  exec('docker logs ' + s.container + ' --tail 1000 2>&1', { maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
-    const activeIds = new Set(parseDownloads((out || '').split('\n')).map(a => a.workshopId))
-    let changed = false
-    for (const entry of pending) {
-      if (activeIds.has(entry.id)) continue // still downloading
-      try {
-        const { modIds, copiedFolders } = registerInstalledMod(s, entry.id)
-        entry.status = 'installed'
-        entry.modIds = modIds
-        entry.copiedFolders = copiedFolders
-      } catch (e) {
-        entry.status = 'failed'
-        entry.error = e.message
-      }
-      entry.updatedAt = new Date().toISOString()
-      changed = true
-    }
-    if (changed) writeQueue(s, queue)
-  })
-}
-setInterval(() => { for (const s of allServers()) reconcileDownloads(s) }, 15000)
-
-// Post-download bookkeeping for one Workshop item: copy its mod folders into the mounted
-// workshop path + the server's mods dir, and register it (and any mod IDs it contains) in the ini.
+// Post-download bookkeeping for one Workshop item. Only registers the item in the server ini
+// if it actually produced loadable mod folders — registering empty/failed downloads is what
+// previously polluted WorkshopItems with entries the game can't load.
 function registerInstalledMod(s, workshopId) {
   try {
     execSync('docker exec ' + s.container + ' sh -c ' + JSON.stringify(
@@ -999,10 +1091,124 @@ function registerInstalledMod(s, workshopId) {
     }
   }
   const newModIds = modIdsFromWorkshop(s, workshopId)
+  if (!newModIds.length) return { status: 'empty', modIds: [], copiedFolders }
   setIniList(s, 'WorkshopItems', [...new Set([...getIniList(s, 'WorkshopItems'), workshopId])])
   setIniList(s, 'Mods', [...new Set([...getIniList(s, 'Mods'), ...newModIds])])
-  return { modIds: newModIds, copiedFolders }
+  return { status: 'installed', modIds: newModIds, copiedFolders }
 }
+
+// Kicks off a SteamCMD download and returns immediately — runs via a *detached* `docker exec -d`
+// inside the PZ server container, so the download survives a restart of this manager.
+// Completion is detected by reconcileDownloads() below, not by a callback on this process.
+function steamcmdDownload(s, workshopIds, source, collectionId) {
+  if (!workshopIds.length) return
+  queueAdd(s, workshopIds, source, collectionId)
+  const items = workshopIds.map(id => '+workshop_download_item 108600 ' + id).join(' ')
+  const cmd = 'docker exec -d ' + s.container + ' /home/steam/steamcmd/steamcmd.sh +force_install_dir /home/steam/pz-dedicated +login anonymous ' + items + ' +quit'
+  exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
+    if (err) {
+      console.error('[download] failed to start for ' + s.name + ':', stderr || err.message)
+      const queue = readQueue(s)
+      for (const e of queue) {
+        if (workshopIds.includes(e.id) && e.status === 'queued') {
+          e.status = 'failed'; e.error = 'Could not start SteamCMD'; e.updatedAt = new Date().toISOString()
+        }
+      }
+      writeQueue(s, queue)
+    }
+  })
+}
+
+// Reconciles the persisted queue against reality on an interval.
+//
+// An item leaves "queued" only once it is no longer actively downloading AND we've confirmed
+// what actually landed on disk. Absence from the active-download log is NOT treated as success
+// on its own — that assumption previously marked never-downloaded mods as "installed" and wrote
+// them into servertest.ini. Items that produce no mod content are marked failed with a reason,
+// and nested collections are detected and expanded into their child items.
+const QUEUE_GRACE_MS = 90 * 1000
+function reconcileDownloads(s) {
+  const queue = readQueue(s)
+  const pending = queue.filter(e => e.status === 'queued')
+  if (!pending.length) return
+  exec('docker logs ' + s.container + ' --tail 1500 2>&1', { maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+    const activeIds = new Set(parseDownloads((out || '').split('\n')).map(a => a.workshopId))
+    const settled = []
+    for (const entry of pending) {
+      if (activeIds.has(entry.id)) continue
+      // Give a just-queued item time to actually appear in the log before judging it.
+      if (Date.now() - new Date(entry.queuedAt).getTime() < QUEUE_GRACE_MS) continue
+      settled.push(entry)
+    }
+    if (!settled.length) return
+
+    // Anything with no content might be a nested collection rather than a failed mod — ask Steam.
+    const empties = settled.filter(e => !hasModContent(s, e.id)).map(e => e.id)
+    steamCollectionDetails(empties, (cErr, collMap) => {
+      const nowIso = new Date().toISOString()
+      const expand = []
+      for (const entry of settled) {
+        const kids = collMap && collMap[entry.id]
+        if (kids && kids.length) {
+          entry.status = 'collection'
+          entry.error = null
+          entry.childCount = kids.length
+          entry.updatedAt = nowIso
+          // Pull the collection out of the mod list — it isn't a loadable mod — and queue its children.
+          setIniList(s, 'WorkshopItems', getIniList(s, 'WorkshopItems').filter(id => id !== entry.id))
+          expand.push({ parent: entry.id, kids })
+          continue
+        }
+        try {
+          const r = registerInstalledMod(s, entry.id)
+          if (r.status === 'installed') {
+            entry.status = 'installed'
+            entry.modIds = r.modIds
+            entry.copiedFolders = r.copiedFolders
+            entry.error = null
+          } else {
+            entry.status = 'failed'
+            entry.error = 'Downloaded nothing usable (no mod folders found)'
+          }
+        } catch (e) {
+          entry.status = 'failed'
+          entry.error = e.message
+        }
+        entry.updatedAt = nowIso
+      }
+      writeQueue(s, queue)
+      for (const x of expand) {
+        const fresh = x.kids.filter(k => !getIniList(s, 'WorkshopItems').includes(k))
+        if (fresh.length) {
+          console.log('[collection] ' + x.parent + ' is a nested collection — queueing ' + fresh.length + ' child item(s)')
+          steamcmdDownload(s, fresh, 'collection', x.parent)
+        }
+      }
+    })
+  })
+}
+setInterval(() => { for (const s of allServers()) reconcileDownloads(s) }, 15000)
+
+// --- Mods list ---
+
+app.get('/api/mods', (req, res) => {
+  const s = srv(req)
+  const workshopIds = getIniList(s, 'WorkshopItems')
+  const queue = readQueue(s)
+  const qById = {}
+  for (const e of queue) qById[e.id] = e
+  const base = workshopIds.map(wid => {
+    const modIds = modIdsFromWorkshop(s, wid)
+    const folders = modNamesFromWorkshop(s, wid)
+    const q = qById[wid]
+    let status = 'ok'
+    if (!modIds.length) status = (q && q.status === 'collection') ? 'collection' : 'missing'
+    return { workshopId: wid, modIds, modFolders: folders, status, error: (q && q.error) || null }
+  })
+  getTitles(workshopIds, titles => {
+    res.json({ mods: base.map(m => Object.assign(m, { title: titles[m.workshopId] || '' })) })
+  })
+})
 
 app.post('/api/mods/install', (req, res) => {
   const s = srv(req)
@@ -1012,7 +1218,6 @@ app.post('/api/mods/install', (req, res) => {
   res.json({ success: true, workshopId, queued: true })
 })
 
-// Re-queues a previously failed download (single item or one item from a collection).
 app.post('/api/mods/retry', (req, res) => {
   const s = srv(req)
   const { workshopId } = req.body
@@ -1021,44 +1226,25 @@ app.post('/api/mods/retry', (req, res) => {
   res.json({ success: true, workshopId, queued: true })
 })
 
-// Fetches a Steam Workshop collection's member item IDs via the public
-// ISteamRemoteStorage/GetCollectionDetails endpoint (no API key required).
-function getCollectionChildren(collectionId, cb) {
-  const data = querystring.stringify({ collectioncount: 1, 'publishedfileids[0]': collectionId })
-  const req = https.request({
-    hostname: 'api.steampowered.com',
-    path: '/ISteamRemoteStorage/GetCollectionDetails/v1/',
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data) }
-  }, r => {
-    let out = ''
-    r.on('data', c => out += c)
-    r.on('end', () => {
-      try {
-        const parsed = JSON.parse(out)
-        const details = (parsed.response && parsed.response.collectiondetails || [])[0]
-        if (!details || details.result !== 1) return cb(new Error('Collection not found'))
-        cb(null, (details.children || []).map(c => c.publishedfileid))
-      } catch (e) { cb(e) }
-    })
-  })
-  req.on('error', cb)
-  req.write(data); req.end()
-}
-
-// Installs every mod in a Workshop collection. Downloads all items in one SteamCMD run,
-// queued and tracked the same way as a single-mod install (see steamcmdDownload /
-// reconcileDownloads) — responds as soon as the collection is resolved so the client isn't
-// stuck waiting on a long download; per-item progress and completion show up in the queue.
-app.post('/api/mods/install-collection', (req, res) => {
+// Re-queues every mod currently registered but missing its files, and drops stale ini entries
+// for anything Steam says is actually a collection.
+app.post('/api/mods/repair', (req, res) => {
   const s = srv(req)
-  const { collectionId } = req.body
-  if (!collectionId || !/^\d+$/.test(collectionId)) return res.status(400).json({ error: 'Invalid collectionId' })
-  getCollectionChildren(collectionId, (err, workshopIds) => {
-    if (err) return res.status(502).json({ error: 'Could not read collection', detail: err.message })
-    if (!workshopIds.length) return res.status(400).json({ error: 'Collection is empty' })
-    steamcmdDownload(s, workshopIds, 'collection', collectionId)
-    res.json({ success: true, collectionId, workshopIds, count: workshopIds.length })
+  const broken = getIniList(s, 'WorkshopItems').filter(id => !hasModContent(s, id))
+  if (!broken.length) return res.json({ success: true, repaired: 0, collections: 0 })
+  steamCollectionDetails(broken, (err, collMap) => {
+    const colls = Object.keys(collMap || {})
+    const retryable = broken.filter(id => !colls.includes(id))
+    // Collections aren't mods: unregister them and install their children instead.
+    if (colls.length) {
+      setIniList(s, 'WorkshopItems', getIniList(s, 'WorkshopItems').filter(id => !colls.includes(id)))
+      for (const cid of colls) {
+        const kids = collMap[cid].filter(k => !getIniList(s, 'WorkshopItems').includes(k))
+        if (kids.length) steamcmdDownload(s, kids, 'collection', cid)
+      }
+    }
+    if (retryable.length) steamcmdDownload(s, retryable, 'single', null)
+    res.json({ success: true, repaired: retryable.length, collections: colls.length })
   })
 })
 
@@ -1073,8 +1259,144 @@ app.delete('/api/mods/:workshopId', (req, res) => {
   }
   setIniList(s, 'WorkshopItems', getIniList(s, 'WorkshopItems').filter(id => id !== workshopId))
   setIniList(s, 'Mods', getIniList(s, 'Mods').filter(id => !removedIds.includes(id)))
+  writeQueue(s, readQueue(s).filter(e => e.id !== workshopId))
   res.json({ success: true, workshopId, removedIds, removedFolders })
 })
+
+// --- Collections ---
+
+app.get('/api/collections', (req, res) => {
+  const s = srv(req)
+  const list = readCollections(s)
+  const installed = new Set(getIniList(s, 'WorkshopItems'))
+  const out = list.map(c => {
+    const items = c.items || []
+    const have = items.filter(id => installed.has(id) && hasModContent(s, id)).length
+    return Object.assign({}, c, { itemCount: items.length, installedCount: have, missingCount: items.length - have })
+  })
+  getTitles(list.map(c => c.id), titles => {
+    res.json({ collections: out.map(c => Object.assign(c, { title: c.title || titles[c.id] || '' })) })
+  })
+})
+
+// Install (or re-install) a collection: resolves nested collections down to real mod items,
+// records it in the registry, and queues anything not already present.
+function installCollection(s, collectionId, cb) {
+  resolveCollectionLeaves(collectionId, (err, leaves, nested) => {
+    if (err) return cb(err)
+    getTitles([collectionId], titles => {
+      const have = new Set(getIniList(s, 'WorkshopItems'))
+      const todo = leaves.filter(id => !have.has(id) || !hasModContent(s, id))
+      upsertCollection(s, {
+        id: collectionId,
+        title: titles[collectionId] || '',
+        items: leaves,
+        nestedCollections: nested || [],
+        lastSynced: new Date().toISOString()
+      })
+      if (todo.length) steamcmdDownload(s, todo, 'collection', collectionId)
+      cb(null, { total: leaves.length, queued: todo.length, nested: (nested || []).length })
+    })
+  })
+}
+
+app.post('/api/collections', (req, res) => {
+  const s = srv(req)
+  const { collectionId } = req.body || {}
+  if (!collectionId || !/^\d+$/.test(collectionId)) return res.status(400).json({ error: 'Invalid collectionId' })
+  installCollection(s, collectionId, (err, r) => {
+    if (err) return res.status(502).json({ error: 'Could not read collection', detail: err.message })
+    res.json(Object.assign({ success: true, collectionId }, r))
+  })
+})
+
+// Re-check a tracked collection against Steam and pull in anything new or missing.
+app.post('/api/collections/:id/sync', (req, res) => {
+  const s = srv(req)
+  const { id } = req.params
+  if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid collection id' })
+  installCollection(s, id, (err, r) => {
+    if (err) return res.status(502).json({ error: 'Sync failed', detail: err.message })
+    res.json(Object.assign({ success: true, collectionId: id }, r))
+  })
+})
+
+// Stop tracking a collection. Mods it installed are left in place unless removeMods is set.
+app.delete('/api/collections/:id', (req, res) => {
+  const s = srv(req)
+  const { id } = req.params
+  const removeMods = String(req.query.removeMods) === 'true'
+  const list = readCollections(s)
+  const entry = list.find(c => c.id === id)
+  writeCollections(s, list.filter(c => c.id !== id))
+  let removed = 0
+  if (removeMods && entry) {
+    // Only remove items this collection uniquely owns — never yank a mod another tracked
+    // collection still depends on.
+    const othersOwn = new Set()
+    for (const c of list) if (c.id !== id) for (const i of (c.items || [])) othersOwn.add(i)
+    for (const wid of (entry.items || [])) {
+      if (othersOwn.has(wid)) continue
+      const ids = modIdsFromWorkshop(s, wid)
+      for (const folder of modNamesFromWorkshop(s, wid)) {
+        const dest = path.join(modsDir(s), folder)
+        if (fs.existsSync(dest)) try { execSync('rm -rf "' + dest + '"') } catch {}
+      }
+      setIniList(s, 'WorkshopItems', getIniList(s, 'WorkshopItems').filter(x => x !== wid))
+      setIniList(s, 'Mods', getIniList(s, 'Mods').filter(x => !ids.includes(x)))
+      removed++
+    }
+  }
+  res.json({ success: true, removedMods: removed })
+})
+
+// --- Scheduled collection auto-sync ---
+// Config lives alongside the registry so it survives restarts. Off by default.
+function autoSyncPath(s) { return s.data + '/collection-autosync.json' }
+function readAutoSync(s) {
+  try { return Object.assign({ enabled: false, intervalHours: 24 }, JSON.parse(fs.readFileSync(autoSyncPath(s), 'utf8'))) }
+  catch { return { enabled: false, intervalHours: 24, lastRun: null } }
+}
+function writeAutoSync(s, cfg) {
+  try { fs.writeFileSync(autoSyncPath(s), JSON.stringify(cfg, null, 2)) } catch (e) {}
+}
+
+app.get('/api/collections/autosync', (req, res) => res.json(readAutoSync(srv(req))))
+
+app.put('/api/collections/autosync', (req, res) => {
+  const s = srv(req)
+  const { enabled, intervalHours } = req.body || {}
+  if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'Invalid' })
+  const iv = parseInt(intervalHours)
+  if (![6, 12, 24, 48, 168].includes(iv)) return res.status(400).json({ error: 'Interval must be 6, 12, 24, 48 or 168 hours' })
+  const cur = readAutoSync(s)
+  writeAutoSync(s, Object.assign(cur, { enabled, intervalHours: iv }))
+  res.json({ success: true })
+})
+
+setInterval(() => {
+  for (const s of allServers()) {
+    const cfg = readAutoSync(s)
+    if (!cfg.enabled) continue
+    const due = !cfg.lastRun || (Date.now() - new Date(cfg.lastRun).getTime()) >= cfg.intervalHours * 3600000
+    if (!due) continue
+    const list = readCollections(s)
+    if (!list.length) continue
+    cfg.lastRun = new Date().toISOString()
+    writeAutoSync(s, cfg)
+    console.log('[autosync] ' + s.name + ': syncing ' + list.length + ' collection(s)')
+    let queuedTotal = 0
+    let pending = list.length
+    for (const c of list) {
+      installCollection(s, c.id, (err, r) => {
+        if (!err && r) queuedTotal += r.queued
+        if (--pending <= 0 && queuedTotal > 0) {
+          pushoverFor(s, 'PZ Collection Sync', 'Auto-sync queued ' + queuedTotal + ' new/missing mod(s) from tracked collections.')
+        }
+      })
+    }
+  }
+}, 10 * 60 * 1000)
 
 // ===== SERVER CONFIG =====
 
