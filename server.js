@@ -18,6 +18,7 @@ const DEFAULT_SERVERS = {
   b41: { id: 'b41', name: 'Build 41', container: 'zomboid',   data: '/pz-data',   workshop: '/workshop',   connect: '192.168.1.20:16261' },
   b42: { id: 'b42', name: 'Build 42', container: 'zomboid42', data: '/pz-data42', workshop: '/workshop42', connect: '192.168.1.20:16271' },
 }
+const PZ_IMAGE = 'danixu86/project-zomboid-dedicated-server'
 const SERVERS_JSON = '/pz-data/servers.json'
 function loadServers() {
   try {
@@ -27,7 +28,67 @@ function loadServers() {
     return Object.keys(out).length ? out : DEFAULT_SERVERS
   } catch { return DEFAULT_SERVERS }
 }
-let SERVERS = loadServers()
+
+// This container's own bind mounts, so we know which host-side paths we can actually read.
+function ownMounts() {
+  try {
+    const id = execSync('hostname').toString().trim()
+    return JSON.parse(execSync('docker inspect ' + id + ' --format "{{json .Mounts}}"', { maxBuffer: 4 * 1024 * 1024 }).toString())
+  } catch { return [] }
+}
+
+// Auto-detects any running/stopped PZ dedicated-server container this manager can actually
+// see the data for (i.e. its /home/steam/Zomboid mount matches one of our own mounted paths).
+// Lets a newly added PZ server show up without a manual servers.json/code edit — the only
+// thing still required is giving mod-manager a matching volume mount in docker-compose.yml.
+function discoverServers() {
+  const mine = ownMounts()
+  const dataMounts = mine.filter(m => /^\/pz-data\d*$/.test(m.Destination))
+  const workshopMounts = mine.filter(m => /^\/workshop\d*$/.test(m.Destination))
+  let names = []
+  try {
+    names = execSync('docker ps -a --filter ancestor=' + PZ_IMAGE + ' --format "{{.Names}}"').toString().trim().split('\n').filter(Boolean)
+  } catch { return {} }
+
+  const found = {}
+  for (const name of names) {
+    try {
+      const mounts = JSON.parse(execSync('docker inspect ' + name + ' --format "{{json .Mounts}}"', { maxBuffer: 4 * 1024 * 1024 }).toString())
+      const dataMount = mounts.find(m => m.Destination === '/home/steam/Zomboid')
+      if (!dataMount) continue
+      const ourData = dataMounts.find(m => m.Source === dataMount.Source)
+      if (!ourData) continue // this manager can't see that server's files — nothing to manage yet
+
+      const suffix = ourData.Destination.replace('/pz-data', '')
+      const workshopMount = mounts.find(m => m.Destination.endsWith('/workshop'))
+      const ourWorkshop = workshopMounts.find(m => m.Destination === '/workshop' + suffix)
+        || (workshopMount && workshopMounts.find(m => m.Source === workshopMount.Source))
+        || workshopMounts[0]
+
+      found[name] = {
+        id: name,
+        name: name,
+        container: name,
+        data: ourData.Destination,
+        workshop: ourWorkshop ? ourWorkshop.Destination : '/workshop',
+        connect: ''
+      }
+    } catch (e) { console.error('[discover] ' + name + ':', e.message) }
+  }
+  return found
+}
+
+// Configured servers (servers.json / DEFAULT_SERVERS) always win on a name clash — auto-discovery
+// only fills in servers that aren't already known.
+function refreshServers() {
+  const configured = loadServers()
+  const discovered = discoverServers()
+  const merged = Object.assign({}, discovered, configured)
+  SERVERS = merged
+}
+let SERVERS = {}
+refreshServers()
+setInterval(refreshServers, 60000)
 const DEFAULT_SERVER = Object.keys(SERVERS)[0]
 
 // Resolve the server a request targets (?server=b42); falls back to the first.
@@ -608,8 +669,18 @@ function validBackupPath(s, type, name) {
 app.get('/api/servers', (req, res) => {
   res.json({
     default: DEFAULT_SERVER,
-    servers: allServers().map(s => ({ id: s.id, name: s.name, container: s.container, connect: s.connect || '' }))
+    servers: allServers().map(s => {
+      let liveName = s.name
+      try { liveName = getIniValue(s, 'PublicName') || s.name || s.container } catch { liveName = s.name || s.container }
+      return { id: s.id, name: liveName, container: s.container, connect: s.connect || '' }
+    })
   })
+})
+
+// Manually re-scans for PZ containers (in case one was added since the last 60s auto-refresh).
+app.post('/api/servers/refresh', (req, res) => {
+  refreshServers()
+  res.json({ success: true, count: allServers().length })
 })
 
 // ===== SERVER CONTROL =====
@@ -780,33 +851,94 @@ app.get('/api/mods', (req, res) => {
   res.json({ mods })
 })
 
+// Downloads one Workshop item via SteamCMD inside the server container. Callback gets
+// (err, stderr) — err is set only on a hard SteamCMD failure, not "no mod folders found".
+function steamcmdDownload(s, workshopIds, cb) {
+  const items = workshopIds.map(id => '+workshop_download_item 108600 ' + id).join(' ')
+  const cmd = 'docker exec ' + s.container + ' /home/steam/steamcmd/steamcmd.sh +force_install_dir /home/steam/pz-dedicated +login anonymous ' + items + ' +quit'
+  exec(cmd, { timeout: 600000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => cb(err, stderr))
+}
+
+// Post-download bookkeeping for one Workshop item: copy its mod folders into the mounted
+// workshop path + the server's mods dir, and register it (and any mod IDs it contains) in the ini.
+function registerInstalledMod(s, workshopId) {
+  try {
+    execSync('docker exec ' + s.container + ' sh -c ' + JSON.stringify(
+      'cp -rn /home/steam/pz-dedicated/steamapps/workshop/content/108600/' + workshopId +
+      ' /home/steam/Steam/steamapps/workshop/content/108600/ 2>/dev/null; true'
+    ), { timeout: 30000 })
+  } catch (e) {}
+  const dir = path.join(workshopContent(s), workshopId, 'mods')
+  const copiedFolders = []
+  if (fs.existsSync(dir)) {
+    for (const folder of fs.readdirSync(dir)) {
+      if (/^\d+\.\d+$/.test(folder)) continue
+      const src = path.join(dir, folder)
+      const dest = path.join(modsDir(s), folder)
+      try { if (!fs.existsSync(dest)) { execSync('cp -r "' + src + '" "' + dest + '"'); copiedFolders.push(folder) } } catch {}
+    }
+  }
+  const newModIds = modIdsFromWorkshop(s, workshopId)
+  setIniList(s, 'WorkshopItems', [...new Set([...getIniList(s, 'WorkshopItems'), workshopId])])
+  setIniList(s, 'Mods', [...new Set([...getIniList(s, 'Mods'), ...newModIds])])
+  return { modIds: newModIds, copiedFolders }
+}
+
 app.post('/api/mods/install', (req, res) => {
   const s = srv(req)
   const { workshopId } = req.body
   if (!workshopId || !/^\d+$/.test(workshopId)) return res.status(400).json({ error: 'Invalid workshopId' })
-  const cmd = 'docker exec ' + s.container + ' /home/steam/steamcmd/steamcmd.sh +force_install_dir /home/steam/pz-dedicated +login anonymous +workshop_download_item 108600 ' + workshopId + ' +quit'
-  exec(cmd, { timeout: 300000 }, (err, stdout, stderr) => {
+  steamcmdDownload(s, [workshopId], (err, stderr) => {
     if (err) return res.status(500).json({ error: 'SteamCMD failed', detail: stderr })
-    try {
-      execSync('docker exec ' + s.container + ' sh -c ' + JSON.stringify(
-        'cp -rn /home/steam/pz-dedicated/steamapps/workshop/content/108600/' + workshopId +
-        ' /home/steam/Steam/steamapps/workshop/content/108600/ 2>/dev/null; true'
-      ), { timeout: 30000 })
-    } catch(e) {}
-    const dir = path.join(workshopContent(s), workshopId, 'mods')
-    const copiedFolders = []
-    if (fs.existsSync(dir)) {
-      for (const folder of fs.readdirSync(dir)) {
-        if (/^\d+\.\d+$/.test(folder)) continue
-        const src = path.join(dir, folder)
-        const dest = path.join(modsDir(s), folder)
-        try { if (!fs.existsSync(dest)) { execSync('cp -r "' + src + '" "' + dest + '"'); copiedFolders.push(folder) } } catch {}
+    const { modIds, copiedFolders } = registerInstalledMod(s, workshopId)
+    res.json({ success: true, workshopId, modIds, copiedFolders })
+  })
+})
+
+// Fetches a Steam Workshop collection's member item IDs via the public
+// ISteamRemoteStorage/GetCollectionDetails endpoint (no API key required).
+function getCollectionChildren(collectionId, cb) {
+  const data = querystring.stringify({ collectioncount: 1, 'publishedfileids[0]': collectionId })
+  const req = https.request({
+    hostname: 'api.steampowered.com',
+    path: '/ISteamRemoteStorage/GetCollectionDetails/v1/',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data) }
+  }, r => {
+    let out = ''
+    r.on('data', c => out += c)
+    r.on('end', () => {
+      try {
+        const parsed = JSON.parse(out)
+        const details = (parsed.response && parsed.response.collectiondetails || [])[0]
+        if (!details || details.result !== 1) return cb(new Error('Collection not found'))
+        cb(null, (details.children || []).map(c => c.publishedfileid))
+      } catch (e) { cb(e) }
+    })
+  })
+  req.on('error', cb)
+  req.write(data); req.end()
+}
+
+// Installs every mod in a Workshop collection. Downloads all items in one SteamCMD run
+// (queued/progress is already visible via the existing /api/downloads log parser), then
+// registers each item once the batch completes. Runs in the background — responds as
+// soon as the collection is resolved so the client isn't stuck waiting on a long download.
+app.post('/api/mods/install-collection', (req, res) => {
+  const s = srv(req)
+  const { collectionId } = req.body
+  if (!collectionId || !/^\d+$/.test(collectionId)) return res.status(400).json({ error: 'Invalid collectionId' })
+  getCollectionChildren(collectionId, (err, workshopIds) => {
+    if (err) return res.status(502).json({ error: 'Could not read collection', detail: err.message })
+    if (!workshopIds.length) return res.status(400).json({ error: 'Collection is empty' })
+    res.json({ success: true, collectionId, workshopIds, count: workshopIds.length })
+    steamcmdDownload(s, workshopIds, (dlErr) => {
+      if (dlErr) return console.error('[collection ' + collectionId + '] SteamCMD failed:', dlErr.message)
+      for (const id of workshopIds) {
+        try { registerInstalledMod(s, id) } catch (e) { console.error('[collection ' + collectionId + '] register ' + id + ' failed:', e.message) }
       }
-    }
-    const newModIds = modIdsFromWorkshop(s, workshopId)
-    setIniList(s, 'WorkshopItems', [...new Set([...getIniList(s, 'WorkshopItems'), workshopId])])
-    setIniList(s, 'Mods', [...new Set([...getIniList(s, 'Mods'), ...newModIds])])
-    res.json({ success: true, workshopId, modIds: newModIds, copiedFolders })
+      console.log('[collection ' + collectionId + '] installed ' + workshopIds.length + ' item(s) for ' + s.name)
+    })
   })
 })
 

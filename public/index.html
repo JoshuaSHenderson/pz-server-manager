@@ -497,7 +497,10 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       <div class="logo">PZ Server<small>Manager // Ops</small></div>
     </div>
     <span id="status-badge" class="badge-unknown">checking...</span>
-    <select id="server-select" class="server-select" onchange="changeServer(this.value)" title="Managed server"></select>
+    <div style="display:flex;gap:.4rem;align-items:center">
+      <select id="server-select" class="server-select" style="flex:1" onchange="changeServer(this.value)" title="Managed server"></select>
+      <button id="detect-servers-btn" class="btn-secondary btn-sm" onclick="detectServers()" title="Detect new servers" style="padding:.4rem .55rem">⟳</button>
+    </div>
     <nav>
       <button class="tab-btn active" onclick="switchTab('dashboard')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
@@ -635,6 +638,14 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <button class="btn-primary" id="install-btn" onclick="installMod()">Install</button>
       </div>
       <p style="margin-top:.5rem;font-size:.78rem;color:var(--muted)">Workshop URL: steamcommunity.com/sharedfiles/filedetails/?id=XXXXXXXXX</p>
+    </div>
+    <div class="card">
+      <div class="card-title">Install Collection</div>
+      <div class="row">
+        <input type="text" id="collection-input" placeholder="Steam Workshop Collection ID">
+        <button class="btn-primary" id="install-collection-btn" onclick="installCollection()">Install All</button>
+      </div>
+      <p style="margin-top:.5rem;font-size:.78rem;color:var(--muted)">Downloads every mod in the collection. Progress shows per-item below; installs can take a while for large collections.</p>
     </div>
     <div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
@@ -883,7 +894,7 @@ window.fetch = (url, opts) => _fetch(withServer(url), opts)
 const _ES = window.EventSource
 window.EventSource = function(url, cfg) { return new _ES(withServer(url), cfg) }
 function changeServer(id) { localStorage.setItem(SRV_KEY, id); location.reload() }
-;(async function initServers() {
+async function initServers() {
   try {
     const r = await _fetch('/api/servers')
     const data = await r.json()
@@ -899,7 +910,15 @@ function changeServer(id) { localStorage.setItem(SRV_KEY, id); location.reload()
     const addr = document.getElementById('connect-addr')
     if (cur && cur.connect && addr) addr.textContent = cur.connect
   } catch {}
-})()
+}
+initServers()
+function detectServers() {
+  const btn = document.getElementById('detect-servers-btn')
+  if (btn) { btn.disabled = true; btn.textContent = '...' }
+  fetch('/api/servers/refresh', { method: 'POST' })
+    .then(function() { return initServers() })
+    .finally(function() { if (btn) { btn.disabled = false; btn.textContent = '⟳' } })
+}
 
 var activeTab = 'dashboard'
 var logSource = null
@@ -1153,6 +1172,26 @@ function installMod() {
     })
     .catch(function(e) { showMsg('mods-msg', 'Failed: ' + e.message, 'error', 0) })
     .finally(function() { btn.disabled = false; btn.textContent = 'Install' })
+}
+
+function installCollection() {
+  var raw = document.getElementById('collection-input').value.trim()
+  var m = raw.match(/(\d{5,})/)
+  var collectionId = m ? m[1] : raw
+  if (!collectionId) return
+  var btn = document.getElementById('install-collection-btn')
+  btn.disabled = true
+  btn.innerHTML = '<span class="spin"></span> Resolving...'
+  showMsg('mods-msg', 'Looking up collection ' + collectionId + '...', 'info', 0)
+  fetch('/api/mods/install-collection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ collectionId: collectionId }) })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok) throw new Error(x.d.error || 'Install failed')
+      document.getElementById('collection-input').value = ''
+      showMsg('mods-msg', 'Queued ' + x.d.count + ' mod(s) from the collection — downloading in the background, watch progress below.', 'success', 8000)
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Failed: ' + e.message, 'error', 0) })
+    .finally(function() { btn.disabled = false; btn.textContent = 'Install All' })
 }
 
 function removeMod(workshopId) {
