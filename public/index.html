@@ -783,10 +783,34 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       </details>
     </div>
     <div class="card" style="margin-top:1.4rem">
-      <div class="card-title">Sandbox &amp; Mod Options</div>
-      <p style="font-size:.85rem;color:var(--muted);margin:0 0 1rem">Raw servertest_SandboxVars.lua — sandbox settings and most mods' own configurable options live here. Edited as text; a .bak copy is kept on save.</p>
-      <textarea id="cfg-sandbox" rows="16" style="width:100%;font-family:var(--font-mono);font-size:.8rem;resize:vertical;box-sizing:border-box;white-space:pre"></textarea>
-      <div style="margin-top:.75rem"><button class="btn-primary" onclick="saveSandbox()">Save Sandbox Options</button></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.5rem">
+        <div class="card-title" style="margin-bottom:0">Sandbox &amp; Mod Options</div>
+        <span id="sandbox-dirty" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono)"></span>
+      </div>
+      <p style="font-size:.85rem;color:var(--muted);margin:0 0 1rem">Sandbox settings and most mods' own options. Values are validated against each option's type and allowed range before anything is written, and a timestamped backup is taken on every save.</p>
+      <div style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin-bottom:1rem">
+        <select id="sandbox-section" class="server-select" style="width:auto;margin:0;padding:.35rem .6rem;font-size:.85rem" onchange="renderSandbox()"></select>
+        <input type="text" id="sandbox-filter" placeholder="Search options..." oninput="renderSandbox()" style="flex:1;min-width:180px;padding:.35rem .55rem;font-size:.85rem">
+        <label style="display:flex;align-items:center;gap:.45rem;cursor:pointer;font-size:.8rem;color:var(--muted)">
+          <input type="checkbox" id="sandbox-changed-only" onchange="renderSandbox()"> Changed only
+        </label>
+      </div>
+      <div id="sandbox-errors"></div>
+      <div id="sandbox-form"><div class="empty">Loading...</div></div>
+      <div style="margin-top:1rem;display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
+        <button class="btn-primary" id="sandbox-save-btn" onclick="saveSandbox()">Save Changes</button>
+        <button class="btn-secondary" onclick="resetSandbox()">Discard Changes</button>
+      </div>
+      <details style="margin-top:1.5rem">
+        <summary style="cursor:pointer;font-size:.88rem;color:var(--muted)">Advanced: edit raw file / view backups</summary>
+        <p style="font-size:.8rem;color:var(--muted);margin:.85rem 0 .5rem">Raw editing bypasses per-option validation — only brace balance is checked. Prefer the form above.</p>
+        <textarea id="cfg-sandbox" rows="14" style="width:100%;font-family:var(--font-mono);font-size:.78rem;resize:vertical;box-sizing:border-box;white-space:pre"></textarea>
+        <div style="margin-top:.6rem"><button class="btn-secondary btn-sm" onclick="saveSandboxRaw()">Save Raw File</button></div>
+        <div style="margin-top:1rem">
+          <div style="font-size:.78rem;color:var(--muted);font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.4rem">Backups</div>
+          <div id="sandbox-backups" style="font-size:.78rem;color:var(--muted)"></div>
+        </div>
+      </details>
     </div>
   </div>
 
@@ -1964,18 +1988,263 @@ function saveConfig() {
     .catch(function(e) { showMsg('config-msg', 'Error: ' + e.message, 'error') })
 }
 
+// --- Sandbox / mod options form ---
+// sandboxData holds the parsed sections from the server; sandboxEdits holds only the values the
+// user has actually changed, keyed "Section.Key". Only edits are sent on save, so an untouched
+// option is never rewritten.
+var sandboxData = null
+var sandboxEdits = {}
+
 function fetchSandbox() {
   fetch('/api/config/sandbox').then(function(r) { return r.json() }).then(function(d) {
-    document.getElementById('cfg-sandbox').value = d.content || ''
-  }).catch(function() {})
+    if (d.error) {
+      document.getElementById('sandbox-form').innerHTML = '<div class="empty">' + esc(d.error) + '</div>'
+      return
+    }
+    sandboxData = d.sections || []
+    sandboxEdits = {}
+    document.getElementById('cfg-sandbox').value = d.raw || ''
+    var sel = document.getElementById('sandbox-section')
+    sel.innerHTML = '<option value="">All sections</option>' + sandboxData.map(function(s) {
+      return '<option value="' + esc(s.name) + '">' + esc(s.name) + ' (' + s.fields.length + ')</option>'
+    }).join('')
+    renderSandbox()
+    fetchSandboxBackups()
+  }).catch(function(e) {
+    document.getElementById('sandbox-form').innerHTML = '<div class="empty">Could not load: ' + esc(e.message) + '</div>'
+  })
+}
+
+function fieldId(f) { return f.section + '.' + f.key }
+function currentVal(f) {
+  var id = fieldId(f)
+  return Object.prototype.hasOwnProperty.call(sandboxEdits, id) ? sandboxEdits[id] : f.value
+}
+function isDirty(f) {
+  var id = fieldId(f)
+  if (!Object.prototype.hasOwnProperty.call(sandboxEdits, id)) return false
+  return String(sandboxEdits[id]) !== String(f.value)
+}
+
+// Client-side mirror of the server's rules, so bad input is caught before a request is made.
+// The server re-validates regardless — this is for immediate feedback, not trust.
+function validateField(f, v) {
+  if (f.type === 'boolean') return typeof v === 'boolean' ? null : 'must be true or false'
+  if (f.type === 'enum') {
+    return (f.options || []).some(function(o) { return o.value === String(v) }) ? null : 'not a valid option'
+  }
+  if (f.type === 'int' || f.type === 'float') {
+    if (String(v).trim() === '') return 'cannot be blank'
+    var n = Number(v)
+    if (!isFinite(n)) return 'must be a number'
+    if (f.type === 'int' && !Number.isInteger(n)) return 'must be a whole number'
+    if (f.min !== null && f.min !== undefined && n < f.min) return 'minimum is ' + f.min
+    if (f.max !== null && f.max !== undefined && n > f.max) return 'maximum is ' + f.max
+    return null
+  }
+  if (f.type === 'string') {
+    if (String(v).indexOf('"') !== -1) return 'cannot contain double quotes'
+    if (String(v).indexOf('\\') !== -1) return 'cannot contain backslashes'
+    return null
+  }
+  return null
+}
+
+function setSandboxValue(id, raw, type) {
+  var v = raw
+  if (type === 'boolean') v = !!raw
+  sandboxEdits[id] = v
+  var f = findField(id)
+  if (f) {
+    var err = validateField(f, v)
+    var errEl = document.getElementById('err-' + cssId(id))
+    if (errEl) errEl.textContent = err || ''
+    var wrap = document.getElementById('fld-' + cssId(id))
+    if (wrap) {
+      wrap.style.borderLeftColor = err ? '#e74c3c' : (isDirty(f) ? 'var(--accent)' : 'transparent')
+    }
+  }
+  updateDirtyCount()
+}
+
+function cssId(id) { return id.replace(/[^A-Za-z0-9_-]/g, '_') }
+function findField(id) {
+  for (var i = 0; i < sandboxData.length; i++) {
+    for (var j = 0; j < sandboxData[i].fields.length; j++) {
+      if (fieldId(sandboxData[i].fields[j]) === id) return sandboxData[i].fields[j]
+    }
+  }
+  return null
+}
+
+function updateDirtyCount() {
+  var n = 0, bad = 0
+  for (var i = 0; i < sandboxData.length; i++) {
+    for (var j = 0; j < sandboxData[i].fields.length; j++) {
+      var f = sandboxData[i].fields[j]
+      if (isDirty(f)) { n++; if (validateField(f, currentVal(f))) bad++ }
+    }
+  }
+  var el = document.getElementById('sandbox-dirty')
+  el.textContent = n ? (n + ' change' + (n > 1 ? 's' : '') + (bad ? ' · ' + bad + ' invalid' : '') + ' pending') : ''
+  el.style.color = bad ? '#e74c3c' : 'var(--muted)'
+  document.getElementById('sandbox-save-btn').disabled = bad > 0
+}
+
+function renderSandbox() {
+  if (!sandboxData) return
+  var sectionPick = document.getElementById('sandbox-section').value
+  var filter = document.getElementById('sandbox-filter').value.trim().toLowerCase()
+  var changedOnly = document.getElementById('sandbox-changed-only').checked
+
+  var html = ''
+  var shownTotal = 0
+  sandboxData.forEach(function(sec) {
+    if (sectionPick && sec.name !== sectionPick) return
+    var fields = sec.fields.filter(function(f) {
+      if (changedOnly && !isDirty(f)) return false
+      if (!filter) return true
+      return f.key.toLowerCase().indexOf(filter) !== -1 ||
+             (f.description || '').toLowerCase().indexOf(filter) !== -1
+    })
+    if (!fields.length) return
+    shownTotal += fields.length
+    html += '<div style="margin-bottom:1.6rem">' +
+      '<div style="font-family:var(--font-mono);font-size:.75rem;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);margin-bottom:.75rem;padding-bottom:.35rem;border-bottom:1px solid var(--border)">' +
+      esc(sec.name) + ' <span style="opacity:.5">' + fields.length + '</span></div>' +
+      fields.map(renderField).join('') + '</div>'
+  })
+  document.getElementById('sandbox-form').innerHTML = shownTotal
+    ? html
+    : '<div class="empty">No options match</div>'
+  updateDirtyCount()
+}
+
+function renderField(f) {
+  var id = fieldId(f)
+  var cid = cssId(id)
+  var val = currentVal(f)
+  var dirty = isDirty(f)
+  var err = validateField(f, val)
+  var control = ''
+
+  if (f.type === 'boolean') {
+    control = '<label style="display:flex;align-items:center;gap:.55rem;cursor:pointer;font-size:.85rem">' +
+      '<input type="checkbox" ' + (val ? 'checked' : '') +
+      ' onchange="setSandboxValue(\'' + id + '\', this.checked, \'boolean\')"> ' +
+      (val ? 'Enabled' : 'Disabled') + '</label>'
+  } else if (f.type === 'enum') {
+    control = '<select class="server-select" style="width:100%;margin:0;padding:.35rem .5rem;font-size:.85rem"' +
+      ' onchange="setSandboxValue(\'' + id + '\', this.value, \'enum\')">' +
+      (f.options || []).map(function(o) {
+        return '<option value="' + esc(o.value) + '"' + (String(val) === o.value ? ' selected' : '') + '>' +
+          esc(o.label) + ' (' + esc(o.value) + ')</option>'
+      }).join('') + '</select>'
+  } else if (f.type === 'int' || f.type === 'float') {
+    var step = f.type === 'int' ? '1' : 'any'
+    var lim = (f.min !== null && f.min !== undefined ? ' min="' + f.min + '"' : '') +
+              (f.max !== null && f.max !== undefined ? ' max="' + f.max + '"' : '')
+    control = '<input type="number" step="' + step + '"' + lim +
+      ' value="' + esc(String(val)) + '" style="width:100%;padding:.35rem .5rem;font-size:.85rem;font-family:var(--font-mono)"' +
+      ' oninput="setSandboxValue(\'' + id + '\', this.value, \'' + f.type + '\')">'
+  } else {
+    control = '<input type="text" value="' + esc(String(val)) + '"' +
+      ' style="width:100%;padding:.35rem .5rem;font-size:.85rem;font-family:var(--font-mono)"' +
+      ' oninput="setSandboxValue(\'' + id + '\', this.value, \'string\')">'
+  }
+
+  var hints = []
+  if (f.min !== null && f.min !== undefined) hints.push('Range ' + f.min + '–' + f.max)
+  if (f.default !== null && f.default !== undefined && f.default !== '') hints.push('Default ' + esc(String(f.default)))
+  hints.push(f.type)
+
+  return '<div id="fld-' + cid + '" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,260px);gap:1rem;align-items:start;padding:.6rem .75rem;border-left:2px solid ' +
+      (err ? '#e74c3c' : (dirty ? 'var(--accent)' : 'transparent')) + ';margin-bottom:.35rem;background:rgba(255,255,255,.015)">' +
+    '<div style="min-width:0">' +
+      '<div style="font-size:.85rem;font-family:var(--font-mono);word-break:break-word">' + esc(f.key) +
+        (dirty ? ' <span style="color:var(--accent);font-size:.7rem">changed</span>' : '') + '</div>' +
+      (f.description ? '<div style="font-size:.75rem;color:var(--muted);margin-top:.2rem">' + esc(f.description) + '</div>' : '') +
+      '<div style="font-size:.68rem;color:var(--muted);opacity:.7;margin-top:.2rem;font-family:var(--font-mono)">' + hints.join(' · ') + '</div>' +
+    '</div>' +
+    '<div>' + control +
+      '<div id="err-' + cid + '" style="font-size:.7rem;color:#e74c3c;margin-top:.25rem">' + (err || '') + '</div>' +
+    '</div></div>'
+}
+
+function resetSandbox() {
+  if (Object.keys(sandboxEdits).length && !confirm('Discard all pending changes?')) return
+  sandboxEdits = {}
+  renderSandbox()
+  showMsg('config-msg', 'Changes discarded.', 'info', 3000)
 }
 
 function saveSandbox() {
+  var updates = {}
+  var invalid = []
+  for (var i = 0; i < sandboxData.length; i++) {
+    for (var j = 0; j < sandboxData[i].fields.length; j++) {
+      var f = sandboxData[i].fields[j]
+      if (!isDirty(f)) continue
+      var v = currentVal(f)
+      var err = validateField(f, v)
+      if (err) { invalid.push(fieldId(f) + ': ' + err); continue }
+      if (f.type === 'int') v = parseInt(v, 10)
+      else if (f.type === 'float') v = Number(v)
+      updates[fieldId(f)] = v
+    }
+  }
+  var errBox = document.getElementById('sandbox-errors')
+  if (invalid.length) {
+    errBox.innerHTML = '<div class="msg msg-error" style="margin-bottom:1rem"><strong>Fix these before saving:</strong><br>' +
+      invalid.map(esc).join('<br>') + '</div>'
+    return
+  }
+  errBox.innerHTML = ''
+  if (!Object.keys(updates).length) return showMsg('config-msg', 'No changes to save.', 'info', 3000)
+
+  var btn = document.getElementById('sandbox-save-btn')
+  btn.disabled = true
+  btn.innerHTML = '<span class="spin"></span> Saving...'
+  fetch('/api/config/sandbox', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ updates: updates }) })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok) {
+        if (x.d.errors && x.d.errors.length) {
+          errBox.innerHTML = '<div class="msg msg-error" style="margin-bottom:1rem"><strong>' + esc(x.d.error || 'Validation failed') + '</strong><br>' +
+            x.d.errors.map(esc).join('<br>') + '</div>'
+          return
+        }
+        throw new Error(x.d.error || 'Save failed')
+      }
+      showMsg('config-msg', 'Saved ' + x.d.changed + ' option(s). Backup: ' + esc(x.d.backup) + '. Restart the server to apply.', 'success', 9000)
+      fetchSandbox()
+    })
+    .catch(function(e) { showMsg('config-msg', 'Error: ' + e.message, 'error', 0) })
+    .finally(function() { btn.disabled = false; btn.textContent = 'Save Changes' })
+}
+
+function saveSandboxRaw() {
+  if (!confirm('Save the raw file? This bypasses per-option validation.')) return
   var content = document.getElementById('cfg-sandbox').value
   fetch('/api/config/sandbox', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: content }) })
-    .then(function(r) { return r.json() })
-    .then(function(d) { showMsg('config-msg', d.success ? 'Sandbox options saved. Restart server to apply.' : 'Error: ' + d.error, d.success ? 'success' : 'error') })
-    .catch(function(e) { showMsg('config-msg', 'Error: ' + e.message, 'error') })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok) throw new Error(x.d.error || 'Save failed')
+      showMsg('config-msg', 'Raw file saved. Backup: ' + esc(x.d.backup) + '. Restart to apply.', 'success', 9000)
+      fetchSandbox()
+    })
+    .catch(function(e) { showMsg('config-msg', 'Error: ' + e.message, 'error', 0) })
+}
+
+function fetchSandboxBackups() {
+  fetch('/api/config/sandbox/backups').then(function(r) { return r.json() }).then(function(d) {
+    var b = d.backups || []
+    document.getElementById('sandbox-backups').innerHTML = b.length
+      ? b.slice(0, 10).map(function(x) {
+          return '<div class="mono" style="font-size:.72rem">' + esc(x.name) + ' <span style="opacity:.6">' + new Date(x.mtime).toLocaleString() + '</span></div>'
+        }).join('')
+      : '<span style="opacity:.7">No backups yet — one is created on each save.</span>'
+  }).catch(function() {})
 }
 
 updateStatus()

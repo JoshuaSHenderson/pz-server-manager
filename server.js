@@ -1466,26 +1466,302 @@ app.put('/api/config', (req, res) => {
   res.json({ success: true })
 })
 
-// Sandbox / mod options (servertest_SandboxVars.lua) — this is where B41/B42 sandbox settings
-// and most mods' own configurable options actually live. It's a Lua table, not an ini, so this
-// exposes it as raw text rather than attempting to parse and re-serialize Lua safely.
+// ===== SANDBOX / MOD OPTIONS =====
+//
+// servertest_SandboxVars.lua is a Lua table, not an ini. Rather than round-tripping Lua
+// (fragile, and it would discard the descriptive comments the game ships), this parses the file
+// into typed field descriptors for a real form UI, and writes changes back by surgically
+// replacing only the value on each changed line. That keeps every comment, blank line and
+// indentation byte-identical, so a save can never reformat or damage the file.
 function sandboxPath(s) { return s.data + '/Server/servertest_SandboxVars.lua' }
+
+const SANDBOX_KEY_RE = /^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?),?\s*$/
+const SANDBOX_OPEN_RE = /^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{\s*$/
+const SANDBOX_CLOSE_RE = /^\s*\}\s*,?\s*$/
+
+// Turns the comment lines that precede a key into structured metadata.
+// PZ writes: a prose description, optional "Min: x Max: y Default: z", and optional
+// "-- N = Label" enum lines.
+function parseSandboxComments(buf) {
+  const meta = { description: '', options: null, min: null, max: null, default: null }
+  const descParts = []
+  for (const raw of buf) {
+    const line = raw.replace(/^\s*--\s?/, '').trim()
+    if (!line) continue
+    const opt = line.match(/^(-?\d+)\s*=\s*(.+)$/)
+    if (opt) {
+      if (!meta.options) meta.options = []
+      meta.options.push({ value: opt[1], label: opt[2].trim() })
+      continue
+    }
+    const mm = line.match(/Min:\s*(-?[\d.]+)\s*Max:\s*(-?[\d.]+)(?:\s*Default:\s*(-?[\d.]+))?/i)
+    if (mm) {
+      meta.min = parseFloat(mm[1])
+      meta.max = parseFloat(mm[2])
+      if (mm[3] !== undefined) meta.default = mm[3]
+      const before = line.slice(0, mm.index).trim()
+      if (before) descParts.push(before)
+      continue
+    }
+    const dm = line.match(/^Default\s*=\s*(.+)$/i)
+    if (dm) { meta.default = dm[1].trim(); continue }
+    descParts.push(line)
+  }
+  meta.description = descParts.join(' ').trim()
+  return meta
+}
+
+function classifySandboxValue(rawValue, meta) {
+  if (/^(true|false)$/i.test(rawValue)) return { type: 'boolean', value: rawValue.toLowerCase() === 'true' }
+  if (/^".*"$/s.test(rawValue)) return { type: 'string', value: rawValue.slice(1, -1) }
+  if (/^-?\d+$/.test(rawValue)) {
+    // An integer that has labelled options is really an enum choice.
+    if (meta.options && meta.options.length) return { type: 'enum', value: rawValue }
+    return { type: 'int', value: parseInt(rawValue, 10) }
+  }
+  if (/^-?\d*\.\d+$/.test(rawValue)) return { type: 'float', value: parseFloat(rawValue) }
+  return { type: 'raw', value: rawValue }
+}
+
+// Parses the file into { sections: [{ name, fields: [...] }] }. Each field carries its 1-based
+// line number, which is what the writer uses to target its replacement.
+function parseSandbox(content) {
+  const lines = content.split('\n')
+  const sections = []
+  const stack = []
+  let commentBuf = []
+  const rootName = 'General'
+  let current = { name: rootName, fields: [] }
+  sections.push(current)
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const trimmed = line.trim()
+
+    if (/^--/.test(trimmed)) { commentBuf.push(trimmed); continue }
+    if (!trimmed) { commentBuf = []; continue }
+
+    if (/^SandboxVars\s*=\s*\{\s*$/.test(trimmed)) { commentBuf = []; continue }
+
+    const open = line.match(SANDBOX_OPEN_RE)
+    if (open) {
+      stack.push(current)
+      current = { name: open[2], fields: [] }
+      sections.push(current)
+      commentBuf = []
+      continue
+    }
+
+    if (SANDBOX_CLOSE_RE.test(trimmed)) {
+      if (stack.length) current = stack.pop()
+      commentBuf = []
+      continue
+    }
+
+    const kv = line.match(SANDBOX_KEY_RE)
+    if (kv) {
+      const key = kv[2]
+      const rawValue = kv[3].trim()
+      const meta = parseSandboxComments(commentBuf)
+      const cls = classifySandboxValue(rawValue, meta)
+      current.fields.push({
+        key,
+        section: current.name,
+        line: i + 1,
+        type: cls.type,
+        value: cls.value,
+        raw: rawValue,
+        description: meta.description,
+        options: meta.options,
+        min: meta.min,
+        max: meta.max,
+        default: meta.default
+      })
+      commentBuf = []
+      continue
+    }
+    commentBuf = []
+  }
+  return { sections: sections.filter(sec => sec.fields.length) }
+}
+
+// Validates one incoming value against the field it targets. Returns an error string, or null.
+function validateSandboxValue(field, value) {
+  const label = field.section + '.' + field.key
+  switch (field.type) {
+    case 'boolean':
+      if (typeof value !== 'boolean') return label + ': must be true or false'
+      return null
+    case 'enum': {
+      const v = String(value)
+      if (!/^-?\d+$/.test(v)) return label + ': must be one of the listed options'
+      if (field.options && !field.options.some(o => o.value === v)) {
+        return label + ': "' + v + '" is not a valid option (expected ' + field.options.map(o => o.value).join(', ') + ')'
+      }
+      return null
+    }
+    case 'int': {
+      if (typeof value === 'string' && !/^-?\d+$/.test(value.trim())) return label + ': must be a whole number'
+      const n = Number(value)
+      if (!Number.isFinite(n)) return label + ': must be a whole number'
+      if (!Number.isInteger(n)) return label + ': must be a whole number (no decimals)'
+      if (field.min !== null && n < field.min) return label + ': must be at least ' + field.min
+      if (field.max !== null && n > field.max) return label + ': must be at most ' + field.max
+      return null
+    }
+    case 'float': {
+      const n = Number(value)
+      if (!Number.isFinite(n)) return label + ': must be a number'
+      if (field.min !== null && n < field.min) return label + ': must be at least ' + field.min
+      if (field.max !== null && n > field.max) return label + ': must be at most ' + field.max
+      return null
+    }
+    case 'string': {
+      if (typeof value !== 'string') return label + ': must be text'
+      if (/[\r\n]/.test(value)) return label + ': cannot contain line breaks'
+      if (value.includes('"')) return label + ': cannot contain double quotes'
+      if (value.includes('\\')) return label + ': cannot contain backslashes'
+      return null
+    }
+    default:
+      return label + ': this option has an unrecognised format and can only be edited in raw mode'
+  }
+}
+
+// Renders a validated value back into Lua source form.
+function formatSandboxValue(field, value) {
+  switch (field.type) {
+    case 'boolean': return value ? 'true' : 'false'
+    case 'enum': return String(value)
+    case 'int': return String(parseInt(value, 10))
+    case 'float': {
+      const n = Number(value)
+      // Keep a decimal point so a float field never silently becomes an int in the file.
+      return Number.isInteger(n) ? n.toFixed(1) : String(n)
+    }
+    case 'string': return '"' + value + '"'
+    default: return String(value)
+  }
+}
+
+// Cheap structural check that the rewritten file is still a well-formed Lua table.
+function sandboxStructureOk(content) {
+  let depth = 0
+  for (const ch of content) {
+    if (ch === '{') depth++
+    else if (ch === '}') { depth--; if (depth < 0) return false }
+  }
+  return depth === 0
+}
 
 app.get('/api/config/sandbox', (req, res) => {
   const s = srv(req)
-  try { res.json({ content: fs.readFileSync(sandboxPath(s), 'utf8') }) }
-  catch (e) { res.status(404).json({ error: 'SandboxVars file not found', detail: e.message }) }
+  try {
+    const content = fs.readFileSync(sandboxPath(s), 'utf8')
+    const parsed = parseSandbox(content)
+    res.json({ sections: parsed.sections, raw: content })
+  } catch (e) {
+    res.status(404).json({ error: 'SandboxVars file not found', detail: e.message })
+  }
 })
 
+// Structured save. Accepts { updates: { "Section.Key": value, ... } }.
+//
+// Everything is validated first — if any single value is invalid, nothing is written and all
+// errors come back at once. Only then is a timestamped backup taken and the file rewritten
+// line-by-line, so unedited lines (including every comment) are preserved byte-for-byte.
 app.put('/api/config/sandbox', (req, res) => {
   const s = srv(req)
-  const { content } = req.body || {}
-  if (typeof content !== 'string' || !content.trim()) return res.status(400).json({ error: 'Empty content' })
+  const body = req.body || {}
+
+  // Raw-mode escape hatch, still validated for structure before it's allowed to land.
+  if (typeof body.content === 'string') {
+    if (!body.content.trim()) return res.status(400).json({ error: 'Empty content' })
+    if (!sandboxStructureOk(body.content)) {
+      return res.status(400).json({ error: 'Unbalanced braces — the file would be invalid Lua. Nothing was saved.' })
+    }
+    try {
+      const backup = sandboxPath(s) + '.' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.bak'
+      fs.copyFileSync(sandboxPath(s), backup)
+      fs.writeFileSync(sandboxPath(s), body.content)
+      return res.json({ success: true, backup: path.basename(backup), mode: 'raw' })
+    } catch (e) { return res.status(500).json({ error: e.message }) }
+  }
+
+  const updates = body.updates
+  if (!updates || typeof updates !== 'object') return res.status(400).json({ error: 'No updates provided' })
+
+  let content, parsed
   try {
-    fs.copyFileSync(sandboxPath(s), sandboxPath(s) + '.bak')
-    fs.writeFileSync(sandboxPath(s), content)
-    res.json({ success: true })
+    content = fs.readFileSync(sandboxPath(s), 'utf8')
+    parsed = parseSandbox(content)
+  } catch (e) { return res.status(500).json({ error: 'Could not read SandboxVars: ' + e.message }) }
+
+  const byId = {}
+  for (const sec of parsed.sections) for (const f of sec.fields) byId[f.section + '.' + f.key] = f
+
+  // Validate everything before touching the file.
+  const errors = []
+  const applies = []
+  for (const [id, value] of Object.entries(updates)) {
+    const field = byId[id]
+    if (!field) { errors.push(id + ': unknown option (was the file changed elsewhere?)'); continue }
+    const err = validateSandboxValue(field, value)
+    if (err) { errors.push(err); continue }
+    applies.push({ field, formatted: formatSandboxValue(field, value) })
+  }
+  if (errors.length) return res.status(400).json({ error: 'Validation failed — nothing was saved', errors })
+
+  // Surgical per-line replacement: only the value between "Key = " and the trailing comma moves.
+  const lines = content.split('\n')
+  let changed = 0
+  for (const { field, formatted } of applies) {
+    const idx = field.line - 1
+    const line = lines[idx]
+    const m = line && line.match(SANDBOX_KEY_RE)
+    if (!m || m[2] !== field.key) {
+      return res.status(409).json({ error: 'SandboxVars changed on disk while editing (line ' + field.line + ' no longer holds ' + field.key + '). Reload and try again.' })
+    }
+    const newLine = m[1] + field.key + ' = ' + formatted + ','
+    if (newLine !== line) { lines[idx] = newLine; changed++ }
+  }
+  const out = lines.join('\n')
+
+  if (!sandboxStructureOk(out)) {
+    return res.status(500).json({ error: 'Refusing to save: result failed the structure check.' })
+  }
+  // Round-trip check — the rewritten file must still parse to the same set of options.
+  try {
+    const reparsed = parseSandbox(out)
+    const before = parsed.sections.reduce((n, sec) => n + sec.fields.length, 0)
+    const after = reparsed.sections.reduce((n, sec) => n + sec.fields.length, 0)
+    if (before !== after) {
+      return res.status(500).json({ error: 'Refusing to save: option count changed (' + before + ' → ' + after + ').' })
+    }
+  } catch (e) {
+    return res.status(500).json({ error: 'Refusing to save: result no longer parses (' + e.message + ')' })
+  }
+
+  try {
+    const backup = sandboxPath(s) + '.' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.bak'
+    fs.copyFileSync(sandboxPath(s), backup)
+    fs.writeFileSync(sandboxPath(s), out)
+    res.json({ success: true, changed, backup: path.basename(backup) })
   } catch (e) { res.status(500).json({ error: e.message }) }
+})
+
+// Lists the timestamped backups this editor has written, newest first.
+app.get('/api/config/sandbox/backups', (req, res) => {
+  const s = srv(req)
+  const dir = path.dirname(sandboxPath(s))
+  const base = path.basename(sandboxPath(s))
+  try {
+    const files = fs.readdirSync(dir)
+      .filter(f => f.startsWith(base + '.') && f.endsWith('.bak'))
+      .map(f => ({ name: f, mtime: fs.statSync(path.join(dir, f)).mtime.toISOString() }))
+      .sort((a, b) => new Date(b.mtime) - new Date(a.mtime))
+    res.json({ backups: files })
+  } catch (e) { res.json({ backups: [] }) }
 })
 
 // ===== SYSTEM STATS =====
