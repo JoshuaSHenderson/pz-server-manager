@@ -4,153 +4,546 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PZ Server Manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Rajdhani:wght@600;700&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0 }
 :root {
-  --bg: #0d0d1a;
-  --bg2: #13132b;
-  --bg3: #1a1a3a;
-  --border: #2a2a5a;
-  --accent: #e94560;
-  --accent2: #4a9eff;
-  --text: #e0e0f0;
-  --muted: #6a6a9a;
-  --success: #22c55e;
-  --danger: #ef4444;
-  --warn: #f59e0b;
+  color-scheme: dark; /* native selects, scrollbars, and option highlights render dark */
+  --bg: #07070f;
+  --bg2: rgba(255,255,255,.028);
+  --bg3: rgba(255,255,255,.05);
+  --border: rgba(148,163,255,.14);
+  --border-strong: rgba(148,163,255,.28);
+  --accent: #f43f5e;
+  --accent-glow: rgba(244,63,94,.35);
+  --accent2: #5eead4;
+  --blue: #60a5fa;
+  --text: #e7e9f4;
+  --muted: #8b90b3;
+  --success: #4ade80;
+  --danger: #f87171;
+  --warn: #fbbf24;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-display: 'Rajdhani', 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  --sidebar-w: 248px;
+  --radius: 14px;
 }
-body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px }
-a { color: var(--accent2); text-decoration: none }
-a:hover { text-decoration: underline }
 
-/* Header */
-header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: .75rem 1.5rem; display: flex; align-items: center; gap: 1rem; position: sticky; top: 0; z-index: 10 }
-.logo { font-size: 1rem; font-weight: 700; color: var(--accent); letter-spacing: .03em; white-space: nowrap }
-#status-badge { font-size: .75rem; padding: .2rem .6rem; border-radius: 999px; font-weight: 600; white-space: nowrap }
-.badge-running { background: #14532d; color: #4ade80 }
-.badge-stopped, .badge-exited { background: #450a0a; color: #fca5a5 }
-.badge-unknown { background: #27272a; color: #a1a1aa }
-nav { display: flex; gap: .25rem; margin-left: auto }
-.tab-btn { padding: .4rem .9rem; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; font-size: .85rem; font-weight: 500; transition: all .15s }
+html { scrollbar-color: rgba(148,163,255,.25) transparent }
+body {
+  font-family: var(--font-body);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+body::before {
+  content: '';
+  position: fixed; inset: 0; z-index: -2;
+  background:
+    radial-gradient(ellipse 900px 600px at 85% -10%, rgba(244,63,94,.10), transparent 60%),
+    radial-gradient(ellipse 800px 700px at -10% 30%, rgba(94,234,212,.05), transparent 55%),
+    radial-gradient(ellipse 700px 500px at 60% 110%, rgba(96,165,250,.07), transparent 60%),
+    var(--bg);
+}
+body::after {
+  content: '';
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(148,163,255,.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148,163,255,.035) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse at 50% 0%, #000 0%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse at 50% 0%, #000 0%, transparent 75%);
+}
+
+a { color: var(--blue); text-decoration: none; transition: color .2s }
+a:hover { color: #93c5fd; text-decoration: underline }
+
+::-webkit-scrollbar { width: 10px; height: 10px }
+::-webkit-scrollbar-track { background: transparent }
+::-webkit-scrollbar-thumb { background: rgba(148,163,255,.18); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box }
+::-webkit-scrollbar-thumb:hover { background: rgba(148,163,255,.35); border: 2px solid transparent; background-clip: padding-box }
+::selection { background: rgba(244,63,94,.35); color: #fff }
+
+/* ============ LAYOUT ============ */
+.app { display: flex; min-height: 100vh }
+
+.sidebar {
+  position: fixed; top: 0; left: 0; bottom: 0; z-index: 50;
+  width: var(--sidebar-w);
+  display: flex; flex-direction: column;
+  padding: 1.5rem 1rem 1.25rem;
+  background: linear-gradient(180deg, rgba(13,14,26,.92), rgba(9,10,20,.92));
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border-right: 1px solid var(--border);
+}
+.sidebar::before {
+  content: ''; position: absolute; top: 0; right: -1px; bottom: 0; width: 1px;
+  background: linear-gradient(180deg, transparent, rgba(244,63,94,.4) 18%, transparent 45%);
+  pointer-events: none;
+}
+
+.brand { display: flex; align-items: center; gap: .8rem; padding: 0 .5rem; margin-bottom: 1.1rem }
+.brand-mark {
+  width: 40px; height: 40px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 11px;
+  background: linear-gradient(135deg, rgba(244,63,94,.22), rgba(244,63,94,.06));
+  border: 1px solid rgba(244,63,94,.4);
+  box-shadow: 0 0 22px rgba(244,63,94,.22), inset 0 1px 0 rgba(255,255,255,.08);
+  color: var(--accent);
+}
+.logo { font-family: var(--font-display); font-size: 1.15rem; font-weight: 700; letter-spacing: .08em; line-height: 1.1; text-transform: uppercase; white-space: nowrap }
+.logo small { display: block; font-size: .58rem; font-weight: 600; letter-spacing: .32em; color: var(--muted) }
+
+#status-badge {
+  display: flex; align-items: center; gap: .55rem;
+  margin: 0 .25rem 1.4rem;
+  padding: .5rem .8rem;
+  border-radius: 10px;
+  font-family: var(--font-mono);
+  font-size: .68rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .14em;
+  border: 1px solid var(--border);
+  background: var(--bg2);
+  white-space: nowrap;
+  transition: all .3s;
+}
+#status-badge::before {
+  content: ''; width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+  background: #71717a;
+}
+#status-badge.badge-running { color: var(--success); border-color: rgba(74,222,128,.35); background: rgba(74,222,128,.07); box-shadow: 0 0 18px rgba(74,222,128,.12) }
+#status-badge.badge-running::before { background: var(--success); box-shadow: 0 0 10px rgba(74,222,128,.9); animation: pulse-dot 2s ease-in-out infinite }
+#status-badge.badge-stopped, #status-badge.badge-exited { color: var(--danger); border-color: rgba(248,113,113,.35); background: rgba(248,113,113,.07); box-shadow: 0 0 18px rgba(248,113,113,.10) }
+#status-badge.badge-stopped::before, #status-badge.badge-exited::before { background: var(--danger); box-shadow: 0 0 10px rgba(248,113,113,.9); animation: pulse-dot 1.2s ease-in-out infinite }
+#status-badge.badge-unknown { color: #a1a1aa }
+@keyframes pulse-dot { 0%,100% { opacity: 1; transform: scale(1) } 50% { opacity: .45; transform: scale(.8) } }
+
+nav { display: flex; flex-direction: column; gap: .2rem }
+.tab-btn {
+  display: flex; align-items: center; gap: .8rem;
+  width: 100%;
+  padding: .68rem .85rem;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: .87rem; font-weight: 500;
+  letter-spacing: .01em;
+  text-align: left;
+  position: relative;
+  transition: all .2s;
+}
+.tab-btn svg { width: 18px; height: 18px; flex-shrink: 0; opacity: .8; transition: all .2s }
 .tab-btn:hover { color: var(--text); background: var(--bg3) }
-.tab-btn.active { color: var(--text); background: var(--bg3); border-color: var(--border) }
+.tab-btn:hover svg { opacity: 1 }
+.tab-btn.active {
+  color: #fff;
+  background: linear-gradient(90deg, rgba(244,63,94,.16), rgba(244,63,94,.04));
+  border-color: rgba(244,63,94,.28);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+}
+.tab-btn.active svg { opacity: 1; color: var(--accent); filter: drop-shadow(0 0 6px rgba(244,63,94,.6)) }
+.tab-btn.active::before {
+  content: ''; position: absolute; left: -1rem; top: 50%; transform: translateY(-50%);
+  width: 3px; height: 60%; border-radius: 0 3px 3px 0;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent-glow);
+}
 
-/* Layout */
-main { max-width: 1100px; margin: 1.5rem auto; padding: 0 1rem }
+.sidebar-foot {
+  margin-top: auto; padding: .9rem .6rem 0;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono); font-size: .62rem;
+  color: var(--muted); letter-spacing: .1em; text-transform: uppercase;
+  line-height: 1.9;
+}
+.sidebar-foot .mono-val { color: rgba(231,233,244,.6) }
+
+main {
+  margin-left: var(--sidebar-w);
+  flex: 1;
+  padding: 2.2rem 2.4rem 3.5rem;
+  max-width: calc(var(--sidebar-w) + 1160px);
+  width: 100%;
+}
+
+/* ============ PANES ============ */
 .tab-pane { display: none }
-.tab-pane.active { display: block }
+.tab-pane.active { display: block; animation: pane-in .35s cubic-bezier(.22,1,.36,1) }
+@keyframes pane-in { from { opacity: 0; transform: translateY(12px) } to { opacity: 1; transform: none } }
 
-/* Cards */
-.card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin-bottom: 1.25rem }
-.card-title { font-size: .75rem; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 1rem }
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem }
-@media (max-width: 640px) { .grid2 { grid-template-columns: 1fr } }
+.pane-head { margin-bottom: 1.5rem }
+.pane-head h1 {
+  font-family: var(--font-display);
+  font-size: 1.7rem; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase;
+  display: flex; align-items: center; gap: .8rem;
+}
+.pane-head h1::before {
+  content: ''; width: 4px; height: 1.35em; border-radius: 2px;
+  background: linear-gradient(180deg, var(--accent), rgba(244,63,94,.2));
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+.pane-head p { color: var(--muted); font-size: .82rem; margin-top: .25rem; padding-left: 1.05rem }
 
-/* Buttons */
-button { padding: .45rem 1rem; border: none; border-radius: 6px; font-size: .85rem; cursor: pointer; font-weight: 600; transition: opacity .15s; display: inline-flex; align-items: center; gap: .4rem }
-button:hover { opacity: .85 }
-button:disabled { opacity: .35; cursor: not-allowed }
-.btn-primary { background: var(--accent); color: #fff }
-.btn-secondary { background: var(--bg3); color: var(--accent2); border: 1px solid var(--border) }
-.btn-success { background: #14532d; color: #4ade80; border: 1px solid #166534 }
-.btn-danger { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d }
-.btn-warn { background: #451a03; color: #fcd34d; border: 1px solid #78350f }
-.btn-sm { font-size: .78rem; padding: .3rem .65rem }
+/* ============ CARDS ============ */
+.card {
+  position: relative;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.4rem 1.5rem;
+  margin-bottom: 1.4rem;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 8px 32px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.045);
+  transition: border-color .25s;
+}
+.card:hover { border-color: var(--border-strong) }
+.card-title {
+  font-family: var(--font-mono);
+  font-size: .68rem; font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase; letter-spacing: .22em;
+  margin-bottom: 1.1rem;
+  display: flex; align-items: center; gap: .6rem;
+}
+.card-title::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(244,63,94,.3), transparent) }
 
-/* Inputs */
-input, select { padding: .45rem .75rem; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: .85rem }
-input:focus, select:focus { outline: 2px solid var(--accent); border-color: transparent }
-input::placeholder { color: var(--muted) }
-select option { background: var(--bg2) }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4rem }
+@media (max-width: 700px) { .grid2 { grid-template-columns: 1fr } }
+
+/* ============ BUTTONS ============ */
+button {
+  padding: .55rem 1.15rem;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font-family: var(--font-body);
+  font-size: .84rem; cursor: pointer; font-weight: 600;
+  letter-spacing: .01em;
+  transition: all .2s;
+  display: inline-flex; align-items: center; gap: .45rem;
+}
+button:hover { transform: translateY(-1px) }
+button:active { transform: translateY(0) }
+button:disabled { opacity: .35; cursor: not-allowed; transform: none }
+.btn-primary {
+  background: linear-gradient(135deg, #f43f5e, #c2274a);
+  color: #fff;
+  box-shadow: 0 4px 18px rgba(244,63,94,.3), inset 0 1px 0 rgba(255,255,255,.2);
+}
+.btn-primary:hover { box-shadow: 0 6px 24px rgba(244,63,94,.45), inset 0 1px 0 rgba(255,255,255,.2) }
+.btn-secondary { background: var(--bg3); color: #a5b4fc; border-color: var(--border) }
+.btn-secondary:hover { border-color: var(--border-strong); background: rgba(255,255,255,.08) }
+.btn-success { background: rgba(74,222,128,.1); color: var(--success); border-color: rgba(74,222,128,.35) }
+.btn-success:hover { background: rgba(74,222,128,.18); box-shadow: 0 0 18px rgba(74,222,128,.18) }
+.btn-danger { background: rgba(248,113,113,.1); color: var(--danger); border-color: rgba(248,113,113,.35) }
+.btn-danger:hover { background: rgba(248,113,113,.18); box-shadow: 0 0 18px rgba(248,113,113,.18) }
+.btn-warn { background: rgba(251,191,36,.1); color: var(--warn); border-color: rgba(251,191,36,.35) }
+.btn-warn:hover { background: rgba(251,191,36,.18); box-shadow: 0 0 18px rgba(251,191,36,.15) }
+.btn-sm { font-size: .76rem; padding: .32rem .7rem; border-radius: 7px }
+
+/* ============ INPUTS ============ */
+input, select, textarea {
+  padding: .55rem .85rem;
+  background: rgba(0,0,0,.35);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: .85rem;
+  transition: border-color .2s, box-shadow .2s, background .2s;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: rgba(244,63,94,.55);
+  box-shadow: 0 0 0 3px rgba(244,63,94,.14);
+  background: rgba(0,0,0,.5);
+}
+input::placeholder, textarea::placeholder { color: rgba(139,144,179,.55) }
+select option { background: #12131f }
+input[type=file] { padding: .5rem; font-size: .8rem; color: var(--muted) }
+input[type=file]::file-selector-button {
+  padding: .35rem .8rem; margin-right: .75rem;
+  background: var(--bg3); color: #a5b4fc;
+  border: 1px solid var(--border); border-radius: 7px;
+  font-size: .78rem; font-weight: 600; cursor: pointer;
+  transition: all .2s; font-family: var(--font-body);
+}
+input[type=file]::file-selector-button:hover { border-color: var(--border-strong) }
+
+/* toggle switches */
+input[type=checkbox] {
+  appearance: none; -webkit-appearance: none;
+  width: 38px; height: 21px; flex-shrink: 0;
+  border-radius: 999px;
+  background: rgba(255,255,255,.09);
+  border: 1px solid var(--border);
+  position: relative; cursor: pointer;
+  transition: all .25s;
+  padding: 0;
+}
+input[type=checkbox]::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 15px; height: 15px; border-radius: 50%;
+  background: #9298bd;
+  transition: all .25s cubic-bezier(.22,1,.36,1);
+}
+input[type=checkbox]:checked {
+  background: linear-gradient(135deg, #f43f5e, #c2274a);
+  border-color: rgba(244,63,94,.6);
+  box-shadow: 0 0 12px rgba(244,63,94,.3);
+}
+input[type=checkbox]:checked::after { left: 18px; background: #fff }
+input[type=checkbox]:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(244,63,94,.2) }
+
+/* override for small inline checkboxes in disk threshold row */
+input[type=number] { appearance: auto }
+
 .row { display: flex; gap: .6rem; align-items: center }
 .row input, .row select { flex: 1 }
 
-/* Messages */
-.msg { padding: .65rem 1rem; border-radius: 6px; margin-bottom: .75rem; font-size: .85rem }
-.msg-success { background: #14532d33; color: #4ade80; border: 1px solid #166534 }
-.msg-error { background: #450a0a33; color: #fca5a5; border: 1px solid #7f1d1d }
-.msg-info { background: #1e3a5f33; color: #93c5fd; border: 1px solid #1e40af }
+/* ============ MESSAGES ============ */
+.msg {
+  padding: .7rem 1rem; border-radius: 10px; margin-bottom: .85rem;
+  font-size: .84rem;
+  backdrop-filter: blur(8px);
+  animation: msg-in .3s cubic-bezier(.22,1,.36,1);
+}
+@keyframes msg-in { from { opacity: 0; transform: translateY(-6px) } to { opacity: 1; transform: none } }
+.msg-success { background: rgba(74,222,128,.08); color: var(--success); border: 1px solid rgba(74,222,128,.3) }
+.msg-error { background: rgba(248,113,113,.08); color: var(--danger); border: 1px solid rgba(248,113,113,.3) }
+.msg-info { background: rgba(96,165,250,.08); color: #93c5fd; border: 1px solid rgba(96,165,250,.3) }
+.msg-warn { background: rgba(251,191,36,.08); color: var(--warn); border: 1px solid rgba(251,191,36,.3) }
 
-/* Tables */
+/* ============ TABLES ============ */
 table { width: 100%; border-collapse: collapse; font-size: .85rem }
-th { text-align: left; padding: .5rem .75rem; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border) }
-td { padding: .55rem .75rem; border-bottom: 1px solid var(--border); vertical-align: middle }
+th {
+  text-align: left; padding: .5rem .75rem;
+  color: var(--muted); font-weight: 600;
+  font-family: var(--font-mono); font-size: .64rem;
+  text-transform: uppercase; letter-spacing: .16em;
+  border-bottom: 1px solid var(--border);
+}
+td { padding: .6rem .75rem; border-bottom: 1px solid rgba(148,163,255,.07); vertical-align: middle; transition: background .15s }
 tr:last-child td { border-bottom: none }
-tr:hover td { background: var(--bg3) }
-.mono { font-family: monospace; font-size: .8rem }
-.badge { display: inline-block; font-size: .7rem; padding: .15rem .45rem; border-radius: 4px; font-weight: 600 }
-.badge-admin { background: #78350f; color: #fcd34d }
-.badge-moderator { background: #1e3a5f; color: #93c5fd }
-.badge-gm { background: #1a2e1a; color: #86efac }
-.badge-overseer { background: #2a1a3a; color: #c4b5fd }
-.badge-observer { background: #1a1a2e; color: #a1a1aa }
-.badge-none, .badge-null { background: #27272a; color: #71717a }
-.badge-banned { background: #450a0a; color: #fca5a5 }
+tbody tr:hover td { background: rgba(255,255,255,.03) }
+.mono { font-family: var(--font-mono); font-size: .78rem }
+.badge { display: inline-block; font-size: .68rem; padding: .18rem .5rem; border-radius: 6px; font-weight: 600; font-family: var(--font-mono); letter-spacing: .04em }
+.badge-admin { background: rgba(251,191,36,.12); color: #fcd34d; border: 1px solid rgba(251,191,36,.3) }
+.badge-moderator { background: rgba(96,165,250,.12); color: #93c5fd; border: 1px solid rgba(96,165,250,.3) }
+.badge-gm { background: rgba(74,222,128,.12); color: #86efac; border: 1px solid rgba(74,222,128,.3) }
+.badge-overseer { background: rgba(196,181,253,.12); color: #c4b5fd; border: 1px solid rgba(196,181,253,.3) }
+.badge-observer { background: rgba(161,161,170,.12); color: #a1a1aa; border: 1px solid rgba(161,161,170,.25) }
+.badge-none, .badge-null { background: rgba(113,113,122,.12); color: #71717a; border: 1px solid rgba(113,113,122,.25) }
+.badge-banned { background: rgba(248,113,113,.14); color: #fca5a5; border: 1px solid rgba(248,113,113,.35) }
 .text-muted { color: var(--muted) }
 .actions { display: flex; gap: .4rem; flex-wrap: wrap }
 
-/* Dashboard stats */
-.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; margin-bottom: 1.25rem }
-.stat { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center }
-.stat-value { font-size: 1.5rem; font-weight: 700; color: var(--accent2) }
-.stat-label { font-size: .75rem; color: var(--muted); margin-top: .2rem }
+/* ============ STATS ============ */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: .9rem; margin-bottom: 1.4rem }
+.stat {
+  position: relative; overflow: hidden;
+  background: rgba(0,0,0,.28);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.05rem .9rem .95rem;
+  text-align: center;
+  transition: all .25s;
+}
+.stat::before {
+  content: ''; position: absolute; top: 0; left: 12%; right: 12%; height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent2), transparent);
+  opacity: .55; transition: opacity .25s;
+}
+.stat:hover { border-color: var(--border-strong); transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,.35) }
+.stat:hover::before { opacity: 1 }
+.stat-value {
+  font-family: var(--font-display);
+  font-size: 1.65rem; font-weight: 700; letter-spacing: .02em;
+  color: #fff;
+  text-shadow: 0 0 18px rgba(94,234,212,.35);
+}
+.stat-label {
+  font-family: var(--font-mono);
+  font-size: .6rem; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .2em;
+  margin-top: .35rem;
+}
 .control-row { display: flex; gap: .75rem; flex-wrap: wrap }
 
-/* Logs */
+/* ============ TERMINAL / LOGS ============ */
+.terminal { position: relative; border-radius: 12px; overflow: hidden; border: 1px solid rgba(74,222,128,.18); box-shadow: 0 0 30px rgba(74,222,128,.05), inset 0 0 60px rgba(0,0,0,.5) }
+.terminal::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 2;
+  background:
+    repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0px, rgba(0,0,0,.16) 1px, transparent 1px, transparent 3px),
+    radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.35) 100%);
+}
 #log-output {
-  background: #070710;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem;
-  height: 60vh;
+  background: #030806;
+  padding: 1rem 1.1rem;
+  height: 62vh;
   overflow-y: auto;
-  font-family: 'Cascadia Code', 'Consolas', monospace;
-  font-size: .78rem;
-  line-height: 1.5;
+  font-family: var(--font-mono);
+  font-size: .76rem;
+  line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-all;
 }
+#log-output::-webkit-scrollbar-thumb { background: rgba(74,222,128,.25); border: 2px solid transparent; background-clip: padding-box }
 .log-line { padding: .05rem 0 }
-.log-ts { color: #4a4a7a; margin-right: .5rem }
+.log-ts { color: rgba(74,222,128,.35); margin-right: .5rem }
 .log-warn { color: #fcd34d }
-.log-error { color: #fca5a5 }
-.log-info { color: #93c5fd }
-.log-default { color: #a0a0c0 }
-.log-controls { display: flex; gap: .6rem; align-items: center; margin-bottom: .75rem; flex-wrap: wrap }
+.log-error { color: #fca5a5; text-shadow: 0 0 8px rgba(248,113,113,.35) }
+.log-info { color: #7dd3fc }
+.log-default { color: rgba(134,239,172,.72) }
+.log-controls { display: flex; gap: .6rem; align-items: center; margin-bottom: .85rem; flex-wrap: wrap }
 .log-controls input { width: 200px }
-#log-count { color: var(--muted); font-size: .8rem; margin-left: auto }
+#log-count { color: var(--muted); font-size: .78rem; margin-left: auto; font-family: var(--font-mono) }
 
-/* Spinner */
 .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,.2); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite }
 @keyframes spin { to { transform: rotate(360deg) } }
 
-/* Empty state */
-.empty { color: var(--muted); text-align: center; padding: 2.5rem 1rem; font-style: italic }
+.empty { color: var(--muted); text-align: center; padding: 2.5rem 1rem; font-style: italic; font-size: .84rem }
+
+.backup-section { margin-bottom: 1.4rem }
+.backup-section-label {
+  font-family: var(--font-mono);
+  font-size: .62rem; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .18em; margin-bottom: .6rem;
+  display: flex; align-items: center; gap: .5rem;
+}
+.backup-section-label::before { content: ''; width: 6px; height: 6px; border-radius: 2px; background: var(--accent2); opacity: .6 }
+
+.progress-bar-wrap { background: rgba(0,0,0,.4); border: 1px solid var(--border); border-radius: 999px; height: 9px; overflow: hidden; margin-top: .5rem }
+.progress-bar {
+  height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, #38bdf8, #5eead4);
+  box-shadow: 0 0 12px rgba(94,234,212,.5);
+  transition: width .2s;
+  position: relative; overflow: hidden;
+}
+.progress-bar::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.45), transparent);
+  animation: shimmer 1.4s linear infinite;
+}
+@keyframes shimmer { from { transform: translateX(-100%) } to { transform: translateX(100%) } }
+
+.time-picker { display: flex; align-items: center; gap: .5rem }
+.time-picker input[type=number] { width: 64px; text-align: center; font-size: 1.05rem; padding: .45rem; font-family: var(--font-mono) }
+.time-picker span { color: var(--muted); font-size: 1.1rem; font-weight: 700 }
+
+/* ============ RESPONSIVE ============ */
+@media (max-width: 900px) {
+  .sidebar { position: sticky; top: 0; bottom: auto; width: 100%; flex-direction: row; align-items: center; gap: .75rem; padding: .6rem .9rem; border-right: none; border-bottom: 1px solid var(--border) }
+  .sidebar::before { display: none }
+  .brand { margin-bottom: 0; padding: 0 }
+  .logo small { display: none }
+  .logo { font-size: .95rem }
+  #status-badge { margin: 0 }
+  nav { flex-direction: row; flex-wrap: wrap; margin-left: auto; gap: .15rem }
+  .tab-btn { width: auto; padding: .5rem .6rem }
+  .tab-btn span { display: none }
+  .tab-btn.active::before { display: none }
+  .sidebar-foot { display: none }
+  .app { flex-direction: column }
+  main { margin-left: 0; padding: 1.25rem 1rem 3rem }
+}
+.server-select {
+  width: 100%;
+  margin: 10px 0 4px;
+  padding: 8px 10px;
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.server-select:hover { border-color: var(--accent); }
+.server-select:focus { outline: 1px solid var(--accent); }
+.server-select option {
+  background: #14141f;
+  color: var(--text);
+}
+.server-select option:checked {
+  background: var(--accent);
+  color: #fff;
+}
 </style>
 </head>
 <body>
-<header>
-  <div class="logo">PZ Server Manager</div>
-  <span id="status-badge" class="badge-unknown">checking...</span>
-  <nav>
-    <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
-    <button class="tab-btn" onclick="switchTab('mods')">Mods</button>
-    <button class="tab-btn" onclick="switchTab('players')">Players</button>
-    <button class="tab-btn" onclick="switchTab('logs')">Logs</button>
-    <button class="tab-btn" onclick="switchTab('config')">Config</button>
-    <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
-  </nav>
-</header>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="10" r="7"/><path d="M9 17v3h6v-3"/><circle cx="9.5" cy="9.5" r="1" fill="currentColor" stroke="none"/><circle cx="14.5" cy="9.5" r="1" fill="currentColor" stroke="none"/><path d="M12 12.5v1.5"/></svg>
+      </div>
+      <div class="logo">PZ Server<small>Manager // Ops</small></div>
+    </div>
+    <span id="status-badge" class="badge-unknown">checking...</span>
+    <select id="server-select" class="server-select" onchange="changeServer(this.value)" title="Managed server"></select>
+    <nav>
+      <button class="tab-btn active" onclick="switchTab('dashboard')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        <span>Dashboard</span>
+      </button>
+      <button class="tab-btn" onclick="switchTab('mods')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.29 7 12 12 20.71 7"/><line x1="12" y1="22" x2="12" y2="12"/></svg>
+        <span>Mods</span>
+      </button>
+      <button class="tab-btn" onclick="switchTab('players')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span>Players</span>
+      </button>
+      <button class="tab-btn" onclick="switchTab('logs')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        <span>Logs</span>
+      </button>
+      <button class="tab-btn" onclick="switchTab('config')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+        <span>Config</span>
+      </button>
+      <button class="tab-btn" onclick="switchTab('backups')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+        <span>Backups</span>
+      </button>
+      <button class="tab-btn" onclick="switchTab('settings')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <span>Settings</span>
+      </button>
+    </nav>
+    <div class="sidebar-foot">
+      LAN <span class="mono-val" id="connect-addr">192.168.1.20:16261</span><br>
+      World <span class="mono-val">servertest</span>
+    </div>
+  </aside>
 
 <main>
   <!-- DASHBOARD -->
   <div id="tab-dashboard" class="tab-pane active">
+    <div class="pane-head"><h1>Dashboard</h1><p>Server status, control, and restart scheduling</p></div>
     <div id="dash-msg"></div>
     <div class="card">
       <div class="card-title">Server Control</div>
       <div class="stat-grid">
         <div class="stat"><div class="stat-value" id="dash-status">—</div><div class="stat-label">Status</div></div>
-        <div class="stat"><div class="stat-value" id="dash-uptime">—</div><div class="stat-label">Started</div></div>
+        <div class="stat"><div class="stat-value" id="dash-uptime" style="font-size:1rem">—</div><div class="stat-label">Started</div></div>
         <div class="stat"><div class="stat-value" id="dash-players">—</div><div class="stat-label">Accounts</div></div>
         <div class="stat"><div class="stat-value" id="dash-mods">—</div><div class="stat-label">Mods</div></div>
         <div class="stat"><div class="stat-value" id="dash-cpu" style="font-size:1.1rem">—</div><div class="stat-label">CPU</div></div>
@@ -163,6 +556,61 @@ tr:hover td { background: var(--bg3) }
         <button class="btn-warn" id="btn-restart" onclick="serverAction('restart')">Restart</button>
       </div>
     </div>
+
+    <div class="card">
+      <div class="card-title">Live Players</div>
+      <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap;margin-bottom:1rem">
+        <div class="stat" style="flex:0 0 110px">
+          <div class="stat-value" id="online-count" style="color:var(--accent2);text-shadow:0 0 18px rgba(94,234,212,.45)">—</div>
+          <div class="stat-label">Online Now</div>
+        </div>
+        <div id="online-list" style="flex:1;font-size:.85rem;color:var(--muted);font-style:italic">Loading...</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:.75rem">
+        <button class="btn-secondary btn-sm" onclick="fetchOnlinePlayers()">Refresh</button>
+        <span id="online-updated" style="font-size:.7rem;color:var(--muted);font-family:var(--font-mono)"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Restart Schedule</div>
+      <div id="sched-msg"></div>
+      <div style="display:flex;align-items:center;gap:1.25rem;margin-bottom:1rem;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.9rem">
+          <input type="checkbox" id="sched-enabled">
+          Auto-restart enabled
+        </label>
+        <span id="sched-server-time" style="font-size:.78rem;color:var(--muted);font-family:var(--font-mono)"></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap">
+        <select id="sched-mode" class="server-select" style="width:auto;margin:0" onchange="schedModeChanged()">
+          <option value="daily">Once daily</option>
+          <option value="interval">Every N hours</option>
+        </select>
+        <select id="sched-interval" class="server-select" style="width:auto;margin:0;display:none">
+          <option value="2">every 2 hours</option>
+          <option value="6">every 6 hours</option>
+          <option value="12">every 12 hours</option>
+          <option value="24">every 24 hours</option>
+        </select>
+        <span id="sched-at-label" style="font-size:.85rem;color:var(--muted)">Restart at</span>
+        <div class="time-picker">
+          <input type="number" id="sched-hour" min="0" max="23" value="4">
+          <span>:</span>
+          <input type="number" id="sched-minute" min="0" max="59" value="0" style="width:64px">
+        </div>
+        <span style="font-size:.78rem;color:var(--muted)">(server local time)</span>
+      </div>
+      <p style="font-size:.78rem;color:var(--muted);margin-bottom:1rem">
+        In-game warnings sent at T-10, T-5, T-1 minutes via RCON.
+      </p>
+      <div class="control-row">
+        <button class="btn-primary" onclick="saveSchedule()">Save Schedule</button>
+        <button class="btn-warn" onclick="warnedRestart()">Warn &amp; Restart in 10 min</button>
+        <button class="btn-secondary" onclick="customWarnedRestart()">Custom delay...</button>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-title">Connection Info</div>
       <table>
@@ -177,6 +625,7 @@ tr:hover td { background: var(--bg3) }
 
   <!-- MODS -->
   <div id="tab-mods" class="tab-pane">
+    <div class="pane-head"><h1>Mods</h1><p>Steam Workshop content installed on the server</p></div>
     <div id="mods-msg"></div>
     <div id="download-banner"></div>
     <div class="card">
@@ -190,7 +639,7 @@ tr:hover td { background: var(--bg3) }
     <div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
         <div class="card-title" style="margin-bottom:0">Installed Mods</div>
-        <span id="mod-count" class="text-muted" style="font-size:.8rem"></span>
+        <span id="mod-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap;margin-left:1rem"></span>
       </div>
       <div id="mods-table"></div>
     </div>
@@ -198,6 +647,7 @@ tr:hover td { background: var(--bg3) }
 
   <!-- PLAYERS -->
   <div id="tab-players" class="tab-pane">
+    <div class="pane-head"><h1>Players</h1><p>Whitelist, access levels, and bans</p></div>
     <div id="players-msg"></div>
     <div class="card">
       <div class="card-title">Add to Whitelist</div>
@@ -217,7 +667,7 @@ tr:hover td { background: var(--bg3) }
     <div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
         <div class="card-title" style="margin-bottom:0">Players</div>
-        <span id="player-count" class="text-muted" style="font-size:.8rem"></span>
+        <span id="player-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap;margin-left:1rem"></span>
       </div>
       <div id="players-table"></div>
     </div>
@@ -225,177 +675,185 @@ tr:hover td { background: var(--bg3) }
 
   <!-- LOGS -->
   <div id="tab-logs" class="tab-pane">
-    <div class="card" style="padding-bottom:.75rem">
+    <div class="pane-head"><h1>Logs</h1><p>Live server output stream</p></div>
+    <div class="card" style="padding-bottom:1rem">
       <div class="log-controls">
         <button class="btn-secondary btn-sm" id="log-toggle" onclick="toggleLog()">Pause</button>
         <button class="btn-secondary btn-sm" onclick="clearLog()">Clear</button>
         <input type="text" id="log-filter" placeholder="Filter..." oninput="applyFilter()" style="width:200px">
         <span id="log-count" class="text-muted" style="font-size:.8rem"></span>
       </div>
-      <div id="log-output"></div>
+      <div class="terminal">
+        <div id="log-output"></div>
+      </div>
     </div>
   </div>
 
-
   <!-- CONFIG -->
   <div id="tab-config" class="tab-pane">
+    <div class="pane-head"><h1>Config</h1><p>Server settings — restart required to apply</p></div>
     <div id="config-msg"></div>
     <div class="card">
       <div class="card-title">Server Settings</div>
       <p style="font-size:.85rem;color:var(--muted);margin:0 0 1.25rem">Changes require a server restart to take effect.</p>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.25rem">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem">
         <div>
-          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Server Name</label>
+          <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Server Name</label>
           <input type="text" id="cfg-PublicName" style="width:100%">
         </div>
         <div>
-          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Password <span style="font-weight:400">(blank = no password)</span></label>
+          <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Password (blank = none)</label>
           <input type="text" id="cfg-Password" style="width:100%">
         </div>
         <div>
-          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Max Players</label>
+          <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Max Players</label>
           <input type="number" id="cfg-MaxPlayers" min="1" max="100" style="width:100%">
         </div>
         <div>
-          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Loot Respawn (hours, 0=off)</label>
+          <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Loot Respawn (hours, 0=off)</label>
           <input type="number" id="cfg-HoursForLootRespawn" min="0" style="width:100%">
         </div>
         <div>
-          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Autosave Every (minutes)</label>
+          <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Autosave Every (minutes)</label>
           <input type="number" id="cfg-SaveWorldEveryMinutes" min="0" style="width:100%">
         </div>
       </div>
-      <div class="card-title" style="margin-bottom:.75rem">Gameplay Flags</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-bottom:1.25rem">
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="cfg-PVP" style="accent-color:var(--accent)"> PvP enabled
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="cfg-SafetySystem" style="accent-color:var(--accent)"> Safety system (PvP toggle)
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="cfg-Open" style="accent-color:var(--accent)"> Open (no whitelist)
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="cfg-Public" style="accent-color:var(--accent)"> Public (show in server browser)
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="cfg-PauseEmpty" style="accent-color:var(--accent)"> Pause when empty
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="cfg-GlobalChat" style="accent-color:var(--accent)"> Global chat
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="cfg-VoiceEnable" style="accent-color:var(--accent)"> Voice chat
-        </label>
+      <div class="card-title" style="margin-bottom:.85rem">Gameplay Flags</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-bottom:1.5rem">
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="cfg-PVP"> PvP enabled</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="cfg-SafetySystem"> Safety system</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="cfg-Open"> Open (no whitelist)</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="cfg-Public"> Public server browser</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="cfg-PauseEmpty"> Pause when empty</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="cfg-GlobalChat"> Global chat</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="cfg-VoiceEnable"> Voice chat</label>
       </div>
       <button class="btn-primary" onclick="saveConfig()">Save</button>
     </div>
   </div>
 
+  <!-- BACKUPS -->
+  <div id="tab-backups" class="tab-pane">
+    <div class="pane-head"><h1>Backups</h1><p>World saves, player DB, and config archives</p></div>
+    <div id="backups-msg"></div>
+    <div class="grid2">
+      <div class="card">
+        <div class="card-title">Download Backup</div>
+        <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem">
+          Creates a .tar.gz with world saves, player DB, and server config. Stop the server first for cleanest backup.
+        </p>
+        <button class="btn-primary" id="btn-download-backup" onclick="downloadBackup()">Download Now</button>
+      </div>
+      <div class="card">
+        <div class="card-title">Upload &amp; Restore</div>
+        <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem">
+          Upload a .tar.gz or PZ native .zip backup. <strong style="color:var(--warn)">Stop the server before restoring.</strong>
+        </p>
+        <div style="margin-bottom:.75rem">
+          <input type="file" id="upload-file" accept=".zip,.tar.gz" style="width:100%;margin-bottom:.5rem">
+        </div>
+        <button class="btn-warn" id="btn-upload-restore" onclick="uploadRestore()">Upload &amp; Restore</button>
+        <div id="upload-progress-wrap" style="display:none;margin-top:.75rem">
+          <div style="font-size:.78rem;color:var(--muted);margin-bottom:.25rem" id="upload-progress-text">Uploading...</div>
+          <div class="progress-bar-wrap"><div class="progress-bar" id="upload-progress-bar" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <div class="card-title" style="margin-bottom:0">Server Backups</div>
+        <button class="btn-secondary btn-sm" onclick="fetchBackups()" style="margin-left:1rem;flex-shrink:0">Refresh</button>
+      </div>
+      <div class="backup-section">
+        <div class="backup-section-label">Startup backups (auto, on each server start)</div>
+        <div id="backups-startup"><div class="empty">Loading...</div></div>
+      </div>
+      <div class="backup-section">
+        <div class="backup-section-label">Version backups (auto, on server update)</div>
+        <div id="backups-version"><div class="empty">Loading...</div></div>
+      </div>
+      <div class="backup-section">
+        <div class="backup-section-label">Manual backups (previously uploaded restores)</div>
+        <div id="backups-manual"><div class="empty">Loading...</div></div>
+      </div>
+    </div>
+  </div>
+
   <!-- SETTINGS -->
   <div id="tab-settings" class="tab-pane">
+    <div class="pane-head"><h1>Settings</h1><p>Notifications and integrations</p></div>
     <div id="settings-msg"></div>
     <div class="card">
       <div class="card-title">Pushover Notifications</div>
       <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem">
-        <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.9rem">
-          <input type="checkbox" id="notif-enabled" style="width:16px;height:16px;accent-color:var(--accent)">
-          Enable notifications
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.9rem">
+          <input type="checkbox" id="notif-enabled"> Enable notifications
         </label>
         <span id="notif-status" class="badge badge-none" style="font-size:.75rem"></span>
       </div>
       <div style="display:grid;gap:.75rem;margin-bottom:1.25rem">
         <div>
-          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">API Token</label>
-          <input type="text" id="notif-token" style="width:100%;font-family:monospace" placeholder="Pushover app token">
+          <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">API Token</label>
+          <input type="text" id="notif-token" style="width:100%;font-family:var(--font-mono)" placeholder="Pushover app token">
         </div>
         <div>
-          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">User Key</label>
-          <input type="text" id="notif-userkey" style="width:100%;font-family:monospace" placeholder="Pushover user key">
+          <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">User Key</label>
+          <input type="text" id="notif-userkey" style="width:100%;font-family:var(--font-mono)" placeholder="Pushover user key">
         </div>
       </div>
-      <div class="card-title" style="margin-bottom:.75rem">Notify On</div>
-      <div style="display:grid;gap:.6rem;margin-bottom:1.25rem">
+      <div class="card-title" style="margin-bottom:.85rem">Notify On</div>
+      <div style="display:grid;gap:.7rem;margin-bottom:1.25rem">
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-serverStart"> Server started / restarted</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-serverStop"> Server stopped (manual)</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-serverCrash"> Server crashed</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-downloadComplete"> Workshop downloads complete</label>
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="evt-serverStart" style="accent-color:var(--accent)">
-          Server started / restarted
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="evt-serverStop" style="accent-color:var(--accent)">
-          Server stopped (manual)
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="evt-serverCrash" style="accent-color:var(--accent)">
-          Server crashed (unexpected stop)
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="evt-downloadComplete" style="accent-color:var(--accent)">
-          Workshop downloads complete
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="evt-lowDisk" style="accent-color:var(--accent)">
-          Low disk space — alert when free space drops below
-          <input type="number" id="notif-diskthreshold" min="1" max="50" style="width:60px;padding:.25rem .4rem" value="5">
-          GB
+          <input type="checkbox" id="evt-lowDisk"> Low disk — alert below
+          <input type="number" id="notif-diskthreshold" min="1" max="50" style="width:60px;padding:.25rem .4rem;appearance:auto;-webkit-appearance:auto" value="5"> GB
         </label>
       </div>
-      <div class="card-title" style="margin-bottom:.75rem">Player Events</div>
-      <div style="display:grid;gap:.6rem;margin-bottom:1.25rem">
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="evt-playerJoin" style="accent-color:var(--accent)">
-          Player joined
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="evt-playerLeave" style="accent-color:var(--accent)">
-          Player left
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="evt-playerDied" style="accent-color:var(--accent)">
-          Player died
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="evt-playerKicked" style="accent-color:var(--accent)">
-          Player kicked
-        </label>
+      <div class="card-title" style="margin-bottom:.85rem">Player Events</div>
+      <div style="display:grid;gap:.7rem;margin-bottom:1.25rem">
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-playerJoin"> Player joined</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-playerLeave"> Player left</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-playerDied"> Player died</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-playerKicked"> Player kicked</label>
       </div>
       <div style="display:flex;gap:.6rem">
         <button class="btn-primary" onclick="saveNotifSettings()">Save</button>
         <button class="btn-secondary" onclick="testNotif()">Send Test</button>
       </div>
     </div>
-    <div class="card" style="margin-top:1.25rem">
+    <div class="card" style="margin-top:1.4rem">
       <div class="card-title">Discord Status Message</div>
-      <p style="font-size:.85rem;color:var(--muted);margin:0 0 1rem">Posts a live server status to a Discord channel via webhook. Updates every 5 minutes automatically.</p>
+      <p style="font-size:.85rem;color:var(--muted);margin:0 0 1rem">Posts live server status to a Discord channel via webhook.</p>
       <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem">
-        <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.9rem">
-          <input type="checkbox" id="discord-enabled" style="width:16px;height:16px;accent-color:var(--accent)">
-          Enable Discord status
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.9rem">
+          <input type="checkbox" id="discord-enabled"> Enable Discord status
         </label>
       </div>
       <div style="display:grid;gap:.75rem;margin-bottom:1.25rem">
         <div>
-          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Webhook URL</label>
-          <input type="text" id="discord-webhook" style="width:100%;font-family:monospace" placeholder="https://discord.com/api/webhooks/...">
+          <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Webhook URL</label>
+          <input type="text" id="discord-webhook" style="width:100%;font-family:var(--font-mono)" placeholder="https://discord.com/api/webhooks/...">
         </div>
         <div>
           <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem;margin-bottom:.75rem">
-            <input type="checkbox" id="discord-richcard" style="accent-color:var(--accent)" onchange="toggleDiscordMode()">
-            Use rich card (embed with status badge, uptime, mod count)
+            <input type="checkbox" id="discord-richcard" onchange="toggleDiscordMode()"> Use rich card embed
           </label>
           <div id="discord-richcard-fields" style="display:none;margin-bottom:.5rem">
-            <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Server IP:Port <span style="font-weight:400">(shown as connect address in card)</span></label>
-            <input type="text" id="discord-serverip" style="width:100%;font-family:monospace" placeholder="137.103.3.3:16261">
+            <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Server IP:Port</label>
+            <input type="text" id="discord-serverip" style="width:100%;font-family:var(--font-mono)" placeholder="137.103.3.3:16261">
           </div>
           <div id="discord-template-fields">
-            <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Message Template &mdash; use <code>&lt;ZomboidServerStats&gt;</code> and optionally <code>&lt;LastUpdated&gt;</code></label>
-            <textarea id="discord-template" rows="3" style="width:100%;font-family:monospace;resize:vertical;box-sizing:border-box" placeholder="Project Zomboid Server: &lt;ZomboidServerStats&gt;"></textarea>
+            <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Message Template</label>
+            <textarea id="discord-template" rows="3" style="width:100%;font-family:var(--font-mono);resize:vertical;box-sizing:border-box" placeholder="Project Zomboid Server: &lt;ZomboidServerStats&gt;"></textarea>
           </div>
         </div>
         <div>
-          <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem">Pinned Message ID <span style="font-weight:400">(auto-set after first update)</span></label>
+          <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Pinned Message ID</label>
           <div style="display:flex;gap:.5rem">
-            <input type="text" id="discord-messageid" readonly style="flex:1;font-family:monospace;opacity:.7" placeholder="(none -- created on first update)">
+            <input type="text" id="discord-messageid" readonly style="flex:1;font-family:var(--font-mono);opacity:.7" placeholder="(auto-set)">
             <button class="btn-secondary btn-sm" onclick="clearDiscordMessage()">Clear</button>
           </div>
         </div>
@@ -406,8 +864,43 @@ tr:hover td { background: var(--bg3) }
     </div>
   </div>
 </main>
+</div>
 
 <script>
+// --- Multi-server plumbing ---
+// Every /api/ call is tagged with the selected server via ?server=<id>.
+const SRV_KEY = 'pz-mgr-server'
+function currentServer() { return localStorage.getItem(SRV_KEY) || '' }
+function withServer(url) {
+  if (typeof url === 'string' && url.startsWith('/api/')) {
+    const id = currentServer()
+    if (id) url += (url.includes('?') ? '&' : '?') + 'server=' + encodeURIComponent(id)
+  }
+  return url
+}
+const _fetch = window.fetch.bind(window)
+window.fetch = (url, opts) => _fetch(withServer(url), opts)
+const _ES = window.EventSource
+window.EventSource = function(url, cfg) { return new _ES(withServer(url), cfg) }
+function changeServer(id) { localStorage.setItem(SRV_KEY, id); location.reload() }
+;(async function initServers() {
+  try {
+    const r = await _fetch('/api/servers')
+    const data = await r.json()
+    const sel = document.getElementById('server-select')
+    if (!sel || !data.servers) return
+    if (!currentServer() || !data.servers.some(s => s.id === currentServer())) {
+      localStorage.setItem(SRV_KEY, data.default)
+    }
+    sel.innerHTML = data.servers.map(s =>
+      '<option value="' + s.id + '"' + (s.id === currentServer() ? ' selected' : '') + '>' + s.name + '</option>'
+    ).join('')
+    const cur = data.servers.find(s => s.id === currentServer())
+    const addr = document.getElementById('connect-addr')
+    if (cur && cur.connect && addr) addr.textContent = cur.connect
+  } catch {}
+})()
+
 var activeTab = 'dashboard'
 var logSource = null
 var logLines = []
@@ -417,13 +910,13 @@ var downloadPoller = null
 var activeDownloads = []
 var cachedMods = []
 
-// ===== TAB SWITCHING =====
+var ALL_TABS = ['dashboard','mods','players','logs','config','backups','settings']
+
 function switchTab(tab) {
   if (activeTab === 'mods') stopDownloadPoll()
   document.getElementById('tab-' + activeTab).classList.remove('active')
-  var tabs = ['dashboard','mods','players','logs','config','settings']
   document.querySelectorAll('.tab-btn').forEach(function(b, i) {
-    b.classList.toggle('active', tabs[i] === tab)
+    b.classList.toggle('active', ALL_TABS[i] === tab)
   })
   activeTab = tab
   document.getElementById('tab-' + tab).classList.add('active')
@@ -433,9 +926,10 @@ function switchTab(tab) {
   if (tab === 'players') fetchPlayers()
   if (tab === 'settings') fetchNotifSettings()
   if (tab === 'config') fetchConfig()
+  if (tab === 'backups') fetchBackups()
+  if (tab === 'dashboard') fetchSchedule()
 }
 
-// ===== STATUS =====
 function updateStatus() {
   fetch('/api/status').then(function(r) { return r.json() }).then(function(d) {
     var badge = document.getElementById('status-badge')
@@ -469,7 +963,6 @@ function updateSysInfo() {
   }).catch(function() {})
 }
 
-// ===== SERVER ACTIONS =====
 function serverAction(action) {
   var labels = { start: 'Starting...', stop: 'Stopping...', restart: 'Restarting...' }
   var btn = document.getElementById('btn-' + action)
@@ -494,7 +987,95 @@ function serverAction(action) {
   })
 }
 
-// ===== DOWNLOADS =====
+function schedModeChanged() {
+  var interval = document.getElementById('sched-mode').value === 'interval'
+  document.getElementById('sched-interval').style.display = interval ? '' : 'none'
+  document.getElementById('sched-at-label').textContent = interval ? 'starting from' : 'Restart at'
+}
+
+function fetchSchedule() {
+  fetch('/api/schedule').then(function(r) { return r.json() }).then(function(d) {
+    document.getElementById('sched-enabled').checked = !!d.enabled
+    document.getElementById('sched-mode').value = d.mode === 'interval' ? 'interval' : 'daily'
+    document.getElementById('sched-interval').value = String(d.intervalHours || 24)
+    schedModeChanged()
+    document.getElementById('sched-hour').value = d.hour !== undefined ? d.hour : 4
+    document.getElementById('sched-minute').value = d.minute !== undefined ? String(d.minute).padStart(2,'0') : '00'
+  }).catch(function() {})
+  fetch('/api/servertime').then(function(r) { return r.json() }).then(function(d) {
+    document.getElementById('sched-server-time').textContent = 'Server time: ' + d.display
+  }).catch(function() {})
+}
+
+function saveSchedule() {
+  var enabled = document.getElementById('sched-enabled').checked
+  var hour = parseInt(document.getElementById('sched-hour').value)
+  var minute = parseInt(document.getElementById('sched-minute').value)
+  if (isNaN(hour) || isNaN(minute)) return showMsg('sched-msg', 'Invalid time.', 'error')
+  var mode = document.getElementById('sched-mode').value
+  var intervalHours = parseInt(document.getElementById('sched-interval').value)
+  fetch('/api/schedule', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: enabled, hour: hour, minute: minute, mode: mode, intervalHours: intervalHours })
+  }).then(function(r) { return r.json() }).then(function(d) {
+    var h = String(hour).padStart(2,'0')
+    var m = String(minute).padStart(2,'0')
+    var desc = mode === 'interval'
+      ? 'Restart every ' + intervalHours + 'h (anchored at ' + h + ':' + m + ').'
+      : 'Daily restart set for ' + h + ':' + m + '.'
+    showMsg('sched-msg', d.success
+      ? (enabled ? desc : 'Auto-restart disabled.')
+      : 'Error: ' + d.error, d.success ? 'success' : 'error')
+  }).catch(function(e) { showMsg('sched-msg', 'Error: ' + e.message, 'error') })
+}
+
+function warnedRestart() {
+  if (!confirm('Warn players then restart in 10 minutes?')) return
+  fetch('/api/server/warned-restart', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ delayMinutes: 10 })
+  }).then(function(r) { return r.json() }).then(function(d) {
+    showMsg('dash-msg', d.success ? d.message : 'Error: ' + d.error, d.success ? 'info' : 'error')
+  }).catch(function(e) { showMsg('dash-msg', 'Error: ' + e.message, 'error') })
+}
+
+function customWarnedRestart() {
+  var delay = parseInt(prompt('Restart in how many minutes? (1-60)', '15'))
+  if (!delay || delay < 1 || delay > 60) return
+  if (!confirm('Restart in ' + delay + ' minutes? Players will be warned.')) return
+  fetch('/api/server/warned-restart', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ delayMinutes: delay })
+  }).then(function(r) { return r.json() }).then(function(d) {
+    showMsg('dash-msg', d.success ? d.message : 'Error: ' + d.error, d.success ? 'info' : 'error')
+  }).catch(function(e) { showMsg('dash-msg', 'Error: ' + e.message, 'error') })
+}
+
+function fetchOnlinePlayers() {
+  fetch('/api/players/online').then(function(r) { return r.json() }).then(function(d) {
+    var countEl = document.getElementById('online-count')
+    var listEl = document.getElementById('online-list')
+    var updEl = document.getElementById('online-updated')
+    countEl.textContent = d.online
+    if (d.online === 0) {
+      listEl.style.fontStyle = 'italic'
+      listEl.innerHTML = '<span style="color:var(--muted)">No players online</span>'
+    } else {
+      listEl.style.fontStyle = ''
+      listEl.innerHTML = d.players.map(function(p) {
+        return '<span style="display:inline-block;padding:.22rem .6rem;margin:.15rem;border-radius:7px;background:rgba(94,234,212,.08);border:1px solid rgba(94,234,212,.25);font-family:var(--font-mono);font-size:.78rem;color:var(--accent2)">' + esc(p) + '</span>'
+      }).join('')
+    }
+    updEl.textContent = 'Updated ' + new Date().toLocaleTimeString()
+  }).catch(function() {
+    document.getElementById('online-count').textContent = '—'
+    document.getElementById('online-updated').textContent = 'Error fetching'
+  })
+}
+
 function startDownloadPoll() {
   if (downloadPoller) return
   fetchDownloads()
@@ -524,7 +1105,6 @@ function renderDownloadBanner() {
   banner.innerHTML = '<div class="msg msg-info" style="margin-bottom:.75rem"><strong>Workshop downloads in progress — do not restart.</strong><br><span style="font-size:.8rem;opacity:.8">Updating: ' + esc(items) + '</span></div>'
 }
 
-// ===== MODS =====
 function fetchMods() {
   document.getElementById('mods-table').innerHTML = '<div class="empty">Loading...</div>'
   fetch('/api/mods').then(function(r) { return r.json() }).then(function(d) {
@@ -585,7 +1165,6 @@ function removeMod(workshopId) {
     })
 }
 
-// ===== PLAYERS =====
 function fetchPlayers() {
   document.getElementById('players-table').innerHTML = '<div class="empty">Loading...</div>'
   fetch('/api/players').then(function(r) { return r.json() }).then(function(d) {
@@ -606,9 +1185,7 @@ function fetchPlayers() {
         : '<button class="btn-warn btn-sm" onclick="setPlayerBanned(\'' + p.username + '\', true)">Ban</button>'
       return '<tr>' +
         '<td class="mono">' + esc(p.username) + (p.displayName && p.displayName !== p.username ? '<br><span class="text-muted" style="font-size:.75rem">' + esc(p.displayName) + '</span>' : '') + '</td>' +
-        '<td>' +
-          '<select class="access-sel" onchange="setAccessLevel(\'' + p.username + '\', this.value)">' + opts + '</select>' +
-        '</td>' +
+        '<td><select class="access-sel" onchange="setAccessLevel(\'' + p.username + '\', this.value)">' + opts + '</select></td>' +
         '<td>' + (p.banned ? '<span class="badge badge-banned">banned</span>' : '<span class="badge badge-' + al + '">' + al + '</span>') + '</td>' +
         '<td class="text-muted" style="font-size:.78rem">' + lastSeen + '</td>' +
         '<td><div class="actions">' + bannedBtn + '<button class="btn-danger btn-sm" onclick="removePlayer(\'' + p.username + '\')">Remove</button></div></td>' +
@@ -663,7 +1240,6 @@ function removePlayer(username) {
     })
 }
 
-// ===== LOGS =====
 function startLog() {
   if (logSource) return
   var out = document.getElementById('log-output')
@@ -677,9 +1253,7 @@ function startLog() {
     if (autoScroll) out.scrollTop = out.scrollHeight
     updateLogCount()
   }
-  logSource.onerror = function() {
-    appendLogLine(out, '--- connection lost, reconnecting... ---')
-  }
+  logSource.onerror = function() { appendLogLine(out, '--- connection lost, reconnecting... ---') }
 }
 
 function stopLog() {
@@ -716,7 +1290,6 @@ function appendLogLine(container, line) {
   if (lower.includes('error') || lower.includes('exception') || lower.includes('fatal')) cls = 'log-error'
   else if (lower.includes('warn')) cls = 'log-warn'
   else if (lower.includes('info') || lower.includes('started') || lower.includes('listening')) cls = 'log-info'
-  // split timestamp from rest
   var tsMatch = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:.Z]+)\s+(.*)$/)
   if (tsMatch) {
     div.innerHTML = '<span class="log-ts">' + esc(tsMatch[1]) + '</span><span class="' + cls + '">' + esc(tsMatch[2]) + '</span>'
@@ -732,7 +1305,129 @@ function updateLogCount() {
   document.getElementById('log-count').textContent = shown + ' lines'
 }
 
-// ===== UTILS =====
+function fetchBackups() {
+  fetch('/api/backups').then(function(r) { return r.json() }).then(function(d) {
+    renderBackupSection('backups-startup', d.startup || [], 'startup')
+    renderBackupSection('backups-version', d.version || [], 'version')
+    renderBackupSection('backups-manual', d.manual || [], 'manual')
+  }).catch(function(e) { showMsg('backups-msg', 'Error loading backups: ' + e.message, 'error') })
+}
+
+function renderBackupSection(containerId, items, type) {
+  var el = document.getElementById(containerId)
+  if (!items.length) { el.innerHTML = '<div class="empty" style="padding:1rem">None</div>'; return }
+  var rows = items.map(function(b) {
+    var size = b.size > 1024*1024 ? (b.size/1024/1024).toFixed(1) + ' MB' : (b.size/1024).toFixed(0) + ' KB'
+    var date = new Date(b.mtime).toLocaleString()
+    return '<tr>' +
+      '<td class="mono" style="word-break:break-all">' + esc(b.name) + '</td>' +
+      '<td style="color:var(--muted);white-space:nowrap">' + size + '</td>' +
+      '<td style="color:var(--muted);font-size:.78rem;white-space:nowrap">' + date + '</td>' +
+      '<td><div class="actions">' +
+        '<a href="/api/backups/download?type=' + type + '&name=' + encodeURIComponent(b.name) + '" class="btn-secondary" style="padding:.3rem .65rem;font-size:.78rem;font-weight:600;border-radius:6px;display:inline-flex;align-items:center;text-decoration:none;border:1px solid var(--border)">Download</a>' +
+        '<button class="btn-warn btn-sm" onclick="restoreBackup(\'' + type + '\',\'' + esc(b.name) + '\')">Restore</button>' +
+      '</div></td>' +
+      '</tr>'
+  }).join('')
+  el.innerHTML = '<table><thead><tr><th>Name</th><th>Size</th><th>Date</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+}
+
+function downloadBackup() {
+  var btn = document.getElementById('btn-download-backup')
+  btn.disabled = true
+  btn.innerHTML = '<span class="spin"></span> Preparing...'
+  showMsg('backups-msg', 'Building backup archive — this may take 30-60 seconds for large worlds.', 'info', 0)
+  var a = document.createElement('a')
+  a.href = '/api/backups/create'
+  a.style.display = 'none'
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(function() {
+    btn.disabled = false
+    btn.textContent = 'Download Now'
+    document.getElementById('backups-msg').innerHTML = ''
+  }, 5000)
+}
+
+function restoreBackup(type, name) {
+  if (!confirm('Restore from "' + name + '"?\n\nWARNING: This will overwrite current world data and player database. Stop the server first!')) return
+  showMsg('backups-msg', 'Restoring from ' + name + '...', 'info', 0)
+  fetch('/api/backups/restore', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: type, name: name })
+  }).then(function(r) { return r.json() }).then(function(d) {
+    if (d.success) {
+      showMsg('backups-msg', 'Restored successfully from ' + name + '. Start the server to verify.', 'success', 0)
+    } else {
+      showMsg('backups-msg', 'Restore failed: ' + (d.error || 'unknown') + (d.detail ? ' — ' + d.detail : ''), 'error', 0)
+    }
+  }).catch(function(e) { showMsg('backups-msg', 'Error: ' + e.message, 'error', 0) })
+}
+
+function uploadRestore() {
+  var fileInput = document.getElementById('upload-file')
+  var file = fileInput.files[0]
+  if (!file) return showMsg('backups-msg', 'Select a file first.', 'error')
+  if (!file.name.endsWith('.zip') && !file.name.endsWith('.tar.gz')) {
+    return showMsg('backups-msg', 'Only .zip and .tar.gz files are supported.', 'error')
+  }
+  if (!confirm('Upload and restore from "' + file.name + '"?\n\nWARNING: This will overwrite current world data. Stop the server first!')) return
+
+  var ext = file.name.endsWith('.tar.gz') ? 'tar.gz' : 'zip'
+  var btn = document.getElementById('btn-upload-restore')
+  var wrap = document.getElementById('upload-progress-wrap')
+  var bar = document.getElementById('upload-progress-bar')
+  var text = document.getElementById('upload-progress-text')
+
+  btn.disabled = true
+  btn.innerHTML = '<span class="spin"></span> Uploading...'
+  wrap.style.display = ''
+  bar.style.width = '0%'
+  text.textContent = 'Uploading 0%...'
+
+  var xhr = new XMLHttpRequest()
+  xhr.open('POST', '/api/backups/upload')
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+  xhr.setRequestHeader('X-Backup-Ext', ext)
+
+  xhr.upload.onprogress = function(e) {
+    if (e.lengthComputable) {
+      var pct = Math.round(e.loaded / e.total * 100)
+      bar.style.width = pct + '%'
+      text.textContent = 'Uploading ' + pct + '%...'
+    }
+  }
+
+  xhr.onload = function() {
+    btn.disabled = false
+    btn.textContent = 'Upload & Restore'
+    wrap.style.display = 'none'
+    try {
+      var d = JSON.parse(xhr.responseText)
+      if (d.success) {
+        showMsg('backups-msg', 'Restored successfully from ' + file.name + '. Start the server to verify.', 'success', 0)
+        fileInput.value = ''
+        fetchBackups()
+      } else {
+        showMsg('backups-msg', 'Restore failed: ' + (d.error || 'unknown'), 'error', 0)
+      }
+    } catch(e) {
+      showMsg('backups-msg', 'Server error (status ' + xhr.status + ')', 'error', 0)
+    }
+  }
+
+  xhr.onerror = function() {
+    btn.disabled = false
+    btn.textContent = 'Upload & Restore'
+    wrap.style.display = 'none'
+    showMsg('backups-msg', 'Upload failed — check network connection.', 'error', 0)
+  }
+
+  xhr.send(file)
+}
+
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
 }
@@ -740,11 +1435,11 @@ function esc(s) {
 function showMsg(id, text, type, timeout) {
   if (timeout === undefined) timeout = 5000
   var el = document.getElementById(id)
+  if (!el) return
   el.innerHTML = '<div class="msg msg-' + (type || 'info') + '">' + esc(text) + '</div>'
-  if (timeout) setTimeout(function() { el.innerHTML = '' }, timeout)
+  if (timeout) setTimeout(function() { if (el) el.innerHTML = '' }, timeout)
 }
 
-// ===== NOTIFICATIONS =====
 function fetchNotifSettings() {
   fetch('/api/notifications').then(function(r) { return r.json() }).then(function(d) {
     document.getElementById('notif-enabled').checked = !!d.enabled
@@ -845,7 +1540,6 @@ function toggleDiscordMode() {
   document.getElementById('discord-template-fields').style.display = rich ? 'none' : ''
 }
 
-// ===== CONFIG =====
 var cfgBools = ['PVP','SafetySystem','Open','Public','PauseEmpty','GlobalChat','VoiceEnable']
 function fetchConfig() {
   fetch('/api/config').then(function(r) { return r.json() }).then(function(d) {
@@ -859,6 +1553,7 @@ function fetchConfig() {
     })
   }).catch(function() {})
 }
+
 function saveConfig() {
   var body = {
     PublicName: document.getElementById('cfg-PublicName').value,
@@ -876,12 +1571,21 @@ function saveConfig() {
     .catch(function(e) { showMsg('config-msg', 'Error: ' + e.message, 'error') })
 }
 
-// ===== INIT =====
 updateStatus()
 updateDashStats()
 fetchMods()
+fetchSchedule()
+fetchOnlinePlayers()
+setInterval(function() { if (activeTab === 'dashboard') fetchOnlinePlayers() }, 30000)
 setInterval(updateStatus, 15000)
 setInterval(updateSysInfo, 30000)
+setInterval(function() {
+  if (activeTab === 'dashboard') {
+    fetch('/api/servertime').then(function(r) { return r.json() }).then(function(d) {
+      document.getElementById('sched-server-time').textContent = 'Server time: ' + d.display
+    }).catch(function() {})
+  }
+}, 60000)
 </script>
 </body>
 </html>
