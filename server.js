@@ -294,7 +294,7 @@ function getServerVersion(s, cb) {
   const cached = versionCache[s.id]
   if (cached && Date.now() - cached.at < VERSION_TTL) return cb(cached.version)
   exec('docker logs ' + s.container + ' --tail 3000 2>&1', { maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
-    const m = (out || '').match(/[^\s]*\bversion=(\S+)\s+demo=/)
+    const m = (out || '').match(/\bversion=(\S+)/)
     const version = m ? m[1] : (cached ? cached.version : '')
     versionCache[s.id] = { version, at: Date.now() }
     cb(version)
