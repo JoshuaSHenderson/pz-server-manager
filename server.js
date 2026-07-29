@@ -78,12 +78,18 @@ function discoverServers() {
   return found
 }
 
-// Configured servers (servers.json / DEFAULT_SERVERS) always win on a name clash — auto-discovery
-// only fills in servers that aren't already known.
+// Configured servers (servers.json / DEFAULT_SERVERS) always win — auto-discovery only adds
+// servers whose *container* isn't already covered by a configured entry (dedupe by container,
+// not by id, since a discovered entry's id defaults to the container name and would otherwise
+// slip past an id-keyed merge as a duplicate of an already-configured server).
 function refreshServers() {
   const configured = loadServers()
   const discovered = discoverServers()
-  const merged = Object.assign({}, discovered, configured)
+  const configuredContainers = new Set(Object.values(configured).map(s => s.container))
+  const merged = Object.assign({}, configured)
+  for (const [id, s] of Object.entries(discovered)) {
+    if (!configuredContainers.has(s.container)) merged[id] = s
+  }
   SERVERS = merged
 }
 let SERVERS = {}
