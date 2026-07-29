@@ -1013,25 +1013,60 @@ app.delete('/api/mods/:workshopId', (req, res) => {
 
 // ===== SERVER CONFIG =====
 
+// Curated fields shown as dedicated controls in the UI; everything else the ini actually
+// contains still round-trips through the "Advanced Options" section below (see getFullIni).
 const CONFIG_FIELDS = [
   'PublicName','Password','MaxPlayers','PVP','SafetySystem','Open','Public',
   'PauseEmpty','GlobalChat','VoiceEnable','HoursForLootRespawn','SaveWorldEveryMinutes'
 ]
 
+// Every key=value pair actually present in servertest.ini — lets the UI expose the full
+// option set without this file needing to enumerate every possible PZ ini key up front.
+function getFullIni(s) {
+  const cfg = {}
+  for (const line of readIni(s).split('\n')) {
+    const m = line.match(/^(\w+)=(.*)$/)
+    if (m) cfg[m[1]] = m[2]
+  }
+  return cfg
+}
+
+const INI_KEY_RE = /^\w+$/
+
 app.get('/api/config', (req, res) => {
   const s = srv(req)
-  const cfg = {}
-  for (const k of CONFIG_FIELDS) cfg[k] = getIniValue(s, k)
-  res.json(cfg)
+  res.json(getFullIni(s))
 })
 
 app.put('/api/config', (req, res) => {
   const s = srv(req)
-  const updates = req.body
-  for (const k of CONFIG_FIELDS) {
-    if (updates[k] !== undefined) setIniValue(s, k, updates[k])
+  const updates = req.body || {}
+  for (const [k, v] of Object.entries(updates)) {
+    if (INI_KEY_RE.test(k) && typeof v === 'string') setIniValue(s, k, v)
   }
   res.json({ success: true })
+})
+
+// Sandbox / mod options (servertest_SandboxVars.lua) — this is where B41/B42 sandbox settings
+// and most mods' own configurable options actually live. It's a Lua table, not an ini, so this
+// exposes it as raw text rather than attempting to parse and re-serialize Lua safely.
+function sandboxPath(s) { return s.data + '/Server/servertest_SandboxVars.lua' }
+
+app.get('/api/config/sandbox', (req, res) => {
+  const s = srv(req)
+  try { res.json({ content: fs.readFileSync(sandboxPath(s), 'utf8') }) }
+  catch (e) { res.status(404).json({ error: 'SandboxVars file not found', detail: e.message }) }
+})
+
+app.put('/api/config/sandbox', (req, res) => {
+  const s = srv(req)
+  const { content } = req.body || {}
+  if (typeof content !== 'string' || !content.trim()) return res.status(400).json({ error: 'Empty content' })
+  try {
+    fs.copyFileSync(sandboxPath(s), sandboxPath(s) + '.bak')
+    fs.writeFileSync(sandboxPath(s), content)
+    res.json({ success: true })
+  } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
 // ===== SYSTEM STATS =====

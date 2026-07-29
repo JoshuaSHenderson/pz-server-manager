@@ -740,6 +740,16 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="cfg-VoiceEnable"> Voice chat</label>
       </div>
       <button class="btn-primary" onclick="saveConfig()">Save</button>
+      <details style="margin-top:1.5rem">
+        <summary style="cursor:pointer;font-size:.9rem;color:var(--muted)">Advanced Options (all remaining servertest.ini keys)</summary>
+        <div id="cfg-advanced-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-top:1rem"></div>
+      </details>
+    </div>
+    <div class="card" style="margin-top:1.4rem">
+      <div class="card-title">Sandbox &amp; Mod Options</div>
+      <p style="font-size:.85rem;color:var(--muted);margin:0 0 1rem">Raw servertest_SandboxVars.lua — sandbox settings and most mods' own configurable options live here. Edited as text; a .bak copy is kept on save.</p>
+      <textarea id="cfg-sandbox" rows="16" style="width:100%;font-family:var(--font-mono);font-size:.8rem;resize:vertical;box-sizing:border-box;white-space:pre"></textarea>
+      <div style="margin-top:.75rem"><button class="btn-primary" onclick="saveSandbox()">Save Sandbox Options</button></div>
     </div>
   </div>
 
@@ -944,7 +954,7 @@ function switchTab(tab) {
   if (tab === 'mods') { fetchMods(); startDownloadPoll() }
   if (tab === 'players') fetchPlayers()
   if (tab === 'settings') fetchNotifSettings()
-  if (tab === 'config') fetchConfig()
+  if (tab === 'config') { fetchConfig(); fetchSandbox() }
   if (tab === 'backups') fetchBackups()
   if (tab === 'dashboard') fetchSchedule()
 }
@@ -1592,6 +1602,9 @@ function toggleDiscordMode() {
 }
 
 var cfgBools = ['PVP','SafetySystem','Open','Public','PauseEmpty','GlobalChat','VoiceEnable']
+var cfgCurated = ['PublicName','Password','MaxPlayers','HoursForLootRespawn','SaveWorldEveryMinutes'].concat(cfgBools)
+var cfgAdvancedKeys = []
+
 function fetchConfig() {
   fetch('/api/config').then(function(r) { return r.json() }).then(function(d) {
     document.getElementById('cfg-PublicName').value = d.PublicName || ''
@@ -1602,6 +1615,16 @@ function fetchConfig() {
     cfgBools.forEach(function(k) {
       document.getElementById('cfg-' + k).checked = (d[k] || '').toLowerCase() === 'true'
     })
+
+    cfgAdvancedKeys = Object.keys(d).filter(function(k) { return cfgCurated.indexOf(k) === -1 }).sort()
+    var grid = document.getElementById('cfg-advanced-grid')
+    grid.innerHTML = cfgAdvancedKeys.map(function(k) {
+      return '<div>' +
+        '<label style="display:block;font-size:.68rem;color:var(--muted);margin-bottom:.3rem;font-family:var(--font-mono)">' + k + '</label>' +
+        '<input type="text" id="cfg-adv-' + k + '" style="width:100%;font-family:var(--font-mono);font-size:.8rem" value="' +
+          String(d[k] || '').replace(/"/g, '&quot;') + '">' +
+        '</div>'
+    }).join('')
   }).catch(function() {})
 }
 
@@ -1616,9 +1639,27 @@ function saveConfig() {
   cfgBools.forEach(function(k) {
     body[k] = document.getElementById('cfg-' + k).checked ? 'true' : 'false'
   })
+  cfgAdvancedKeys.forEach(function(k) {
+    var el = document.getElementById('cfg-adv-' + k)
+    if (el) body[k] = el.value
+  })
   fetch('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(function(r) { return r.json() })
     .then(function(d) { showMsg('config-msg', d.success ? 'Saved. Restart server to apply.' : 'Error: ' + d.error, d.success ? 'success' : 'error') })
+    .catch(function(e) { showMsg('config-msg', 'Error: ' + e.message, 'error') })
+}
+
+function fetchSandbox() {
+  fetch('/api/config/sandbox').then(function(r) { return r.json() }).then(function(d) {
+    document.getElementById('cfg-sandbox').value = d.content || ''
+  }).catch(function() {})
+}
+
+function saveSandbox() {
+  var content = document.getElementById('cfg-sandbox').value
+  fetch('/api/config/sandbox', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: content }) })
+    .then(function(r) { return r.json() })
+    .then(function(d) { showMsg('config-msg', d.success ? 'Sandbox options saved. Restart server to apply.' : 'Error: ' + d.error, d.success ? 'success' : 'error') })
     .catch(function(e) { showMsg('config-msg', 'Error: ' + e.message, 'error') })
 }
 
