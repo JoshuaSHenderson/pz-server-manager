@@ -866,6 +866,17 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
     <div class="pane-head"><h1>Settings</h1><p>Notifications and integrations</p></div>
     <div id="settings-msg"></div>
     <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:.4rem">
+        <div class="card-title" style="margin:0">Managed Servers</div>
+        <button class="btn-secondary btn-sm" onclick="detectServers()">Re-scan</button>
+      </div>
+      <p style="font-size:.78rem;color:var(--muted);margin:0 0 .9rem">
+        PZ containers are detected automatically. Rename them, pick the default, hide the ones you don't
+        manage here, and forget leftovers from servers that no longer exist.
+      </p>
+      <div id="servers-admin"></div>
+    </div>
+    <div class="card">
       <div class="card-title">Pushover Notifications</div>
       <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem">
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.9rem">
@@ -961,34 +972,131 @@ function withServer(url) {
   return url
 }
 const _fetch = window.fetch.bind(window)
-window.fetch = (url, opts) => _fetch(withServer(url), opts)
+// If the selected server no longer exists the API says so explicitly (404 UNKNOWN_SERVER)
+// instead of quietly acting on a different one. Drop the stale selection and reload once.
+window.fetch = function(url, opts) {
+  return _fetch(withServer(url), opts).then(function(r) {
+    if (r.status === 404 && currentServer()) {
+      return r.clone().json().then(function(j) {
+        if (j && j.code === 'UNKNOWN_SERVER') { localStorage.removeItem(SRV_KEY); location.reload() }
+        return r
+      }).catch(function() { return r })
+    }
+    return r
+  })
+}
 const _ES = window.EventSource
 window.EventSource = function(url, cfg) { return new _ES(withServer(url), cfg) }
 function changeServer(id) { localStorage.setItem(SRV_KEY, id); location.reload() }
+
+var serverList = { servers: [], hidden: [], stale: [], default: '' }
 async function initServers() {
   try {
     const r = await _fetch('/api/servers')
     const data = await r.json()
+    serverList = data
     const sel = document.getElementById('server-select')
     if (!sel || !data.servers) return
+    // Selected server gone (removed container, renamed id, hidden)? Fall back to the default.
     if (!currentServer() || !data.servers.some(s => s.id === currentServer())) {
-      localStorage.setItem(SRV_KEY, data.default)
+      if (data.default) localStorage.setItem(SRV_KEY, data.default)
+      else localStorage.removeItem(SRV_KEY)
     }
-    sel.innerHTML = data.servers.map(s =>
-      '<option value="' + s.id + '"' + (s.id === currentServer() ? ' selected' : '') + '>' + s.name + '</option>'
-    ).join('')
+    sel.innerHTML = data.servers.length
+      ? data.servers.map(s =>
+          '<option value="' + s.id + '"' + (s.id === currentServer() ? ' selected' : '') + '>' +
+          (s.state === 'running' ? '' : '○ ') + esc(s.name) + '</option>'
+        ).join('')
+      : '<option value="">no servers detected</option>'
     const cur = data.servers.find(s => s.id === currentServer())
     const addr = document.getElementById('connect-addr')
     if (cur && cur.connect && addr) addr.textContent = cur.connect
+    renderServerAdmin()
   } catch {}
 }
 initServers()
 function detectServers() {
   const btn = document.getElementById('detect-servers-btn')
   if (btn) { btn.disabled = true; btn.textContent = '...' }
-  fetch('/api/servers/refresh', { method: 'POST' })
+  _fetch('/api/servers/refresh', { method: 'POST' })
     .then(function() { return initServers() })
     .finally(function() { if (btn) { btn.disabled = false; btn.textContent = '⟳' } })
+}
+
+// --- Servers admin (Settings tab) ---
+function serverStateBadge(st) {
+  var cls = st === 'running' ? 'badge-gm' : (st === 'missing' ? 'badge-banned' : 'badge-none')
+  return '<span class="badge ' + cls + '" style="font-size:.7rem">' + esc(st) + '</span>'
+}
+function serverAdminRow(s, kind) {
+  var actions = ''
+  if (kind === 'active') {
+    actions += '<button class="btn-secondary btn-sm" onclick="editServer(\'' + s.id + '\')">Edit</button> '
+    if (s.id !== serverList.default) actions += '<button class="btn-secondary btn-sm" onclick="setDefaultServer(\'' + s.id + '\')">Make default</button> '
+    if (serverList.servers.length > 1) actions += '<button class="btn-secondary btn-sm" onclick="hideServer(\'' + s.id + '\',true)">Hide</button>'
+  } else if (kind === 'hidden') {
+    actions = '<button class="btn-secondary btn-sm" onclick="hideServer(\'' + s.id + '\',false)">Unhide</button>'
+  } else {
+    actions = '<button class="btn-danger btn-sm" onclick="forgetServer(\'' + s.id + '\')">Forget</button>'
+  }
+  var notes = []
+  if (s.id === serverList.default && kind === 'active') notes.push('default')
+  if (s.discovered) notes.push('auto-detected')
+  if (kind === 'active' && !s.managed) notes.push('data not mounted — control only')
+  if (kind === 'stale') notes.push('container no longer exists')
+  return '<tr><td>' + esc(s.name) + (notes.length ? '<div style="font-size:.7rem;color:var(--muted)">' + esc(notes.join(' · ')) + '</div>' : '') + '</td>' +
+    '<td style="font-family:var(--font-mono);font-size:.78rem">' + esc(s.container) + '</td>' +
+    '<td style="font-family:var(--font-mono);font-size:.78rem">' + esc(s.id) + '</td>' +
+    '<td style="font-family:var(--font-mono);font-size:.78rem">' + esc(s.connect || '—') + '</td>' +
+    '<td>' + serverStateBadge(s.state) + '</td>' +
+    '<td style="white-space:nowrap">' + actions + '</td></tr>'
+}
+function renderServerAdmin() {
+  var el = document.getElementById('servers-admin')
+  if (!el) return
+  var rows = serverList.servers.map(function(s) { return serverAdminRow(s, 'active') })
+    .concat((serverList.hidden || []).map(function(s) { return serverAdminRow(s, 'hidden') }))
+    .concat((serverList.stale || []).map(function(s) { return serverAdminRow(s, 'stale') }))
+  el.innerHTML =
+    '<table><thead><tr><th>Name</th><th>Container</th><th>ID</th><th>Connect</th><th>State</th><th></th></tr></thead>' +
+    '<tbody>' + (rows.join('') || '<tr><td colspan="6" style="color:var(--muted)">No PZ containers found.</td></tr>') + '</tbody></table>' +
+    ((serverList.stale || []).length ? '<p style="font-size:.78rem;color:var(--muted);margin-top:.6rem">Entries marked <em>container no longer exists</em> are leftovers from a removed server. Forget them to clear the list.</p>' : '')
+}
+function findServerAny(id) {
+  return serverList.servers.concat(serverList.hidden || [], serverList.stale || []).find(function(s) { return s.id === id })
+}
+async function putServer(id, body) {
+  const r = await _fetch('/api/servers/' + encodeURIComponent(id), {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  })
+  const j = await r.json().catch(function() { return {} })
+  if (!r.ok) { alert(j.error || 'Failed'); return false }
+  // Our own selection may have been renamed out from under us.
+  if (body.id && currentServer() === id) localStorage.setItem(SRV_KEY, body.id)
+  await initServers()
+  return true
+}
+function editServer(id) {
+  var s = findServerAny(id); if (!s) return
+  var name = prompt('Display name for "' + s.container + '":', s.name); if (name === null) return
+  var connect = prompt('Connect address (host:port), blank for none:', s.connect || ''); if (connect === null) return
+  putServer(id, { name: name, connect: connect })
+}
+function setDefaultServer(id) { putServer(id, { makeDefault: true }) }
+function hideServer(id, hidden) {
+  if (hidden && !confirm('Hide this server from the picker? Nothing is deleted — unhide it here any time.')) return
+  putServer(id, { hidden: hidden }).then(function(ok) {
+    if (ok && hidden && currentServer() === id) location.reload()
+  })
+}
+async function forgetServer(id) {
+  var s = findServerAny(id); if (!s) return
+  if (!confirm('Forget "' + s.name + '"?\n\nThis only removes it from this manager\'s list. No container, world save or file is touched.')) return
+  const r = await _fetch('/api/servers/' + encodeURIComponent(id), { method: 'DELETE' })
+  const j = await r.json().catch(function() { return {} })
+  if (!r.ok) return alert(j.error || 'Failed')
+  if (currentServer() === id) { localStorage.removeItem(SRV_KEY); return location.reload() }
+  initServers()
 }
 
 var activeTab = 'dashboard'

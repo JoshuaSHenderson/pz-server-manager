@@ -12,21 +12,54 @@ app.use(express.json())
 app.use(express.static('public'))
 
 // ===== SERVER REGISTRY =====
-// Each managed PZ server: container name + mounted data/workshop paths.
-// Override/extend by dropping a servers.json next to this default list.
-const DEFAULT_SERVERS = {
-  b41: { id: 'b41', name: 'Build 41', container: 'zomboid',   data: '/pz-data',   workshop: '/workshop',   connect: '192.168.1.20:16261' },
-  b42: { id: 'b42', name: 'Build 42', container: 'zomboid42', data: '/pz-data42', workshop: '/workshop42', connect: '192.168.1.20:16271' },
+// A managed PZ server is a Docker container plus the data/workshop paths this manager has
+// mounted for it. Three inputs, merged in refreshServers():
+//   1. auto-discovery  — every PZ-image container whose data dir we can actually read
+//   2. servers.json    — user overrides (rename / connect / hide / default), keyed by CONTAINER
+//   3. SEED_SERVERS    — bootstrap labels for a first run before anything is customised
+// A server only reaches the picker if its container exists *right now*. That is the rule that
+// stops removed servers (e.g. the old zomboid42 sandbox) lingering as unusable ghost entries.
+const SEED_SERVERS = {
+  zomboid: { id: 'b41', name: 'Build 41', data: '/pz-data', workshop: '/workshop', connect: '192.168.1.20:16261' },
 }
 const PZ_IMAGE = 'danixu86/project-zomboid-dedicated-server'
 const SERVERS_JSON = '/pz-data/servers.json'
-function loadServers() {
+
+// Overrides are keyed by container name, not by id: the container is the stable real-world
+// identity, while an id is just a label the user is allowed to change.
+function readServerConfig() {
+  let raw
+  try { raw = JSON.parse(fs.readFileSync(SERVERS_JSON, 'utf8')) }
+  catch { return { overrides: {}, hidden: [], default: '' } }
+  if (raw && raw.overrides) {
+    return { overrides: raw.overrides || {}, hidden: raw.hidden || [], default: raw.default || '' }
+  }
+  // Legacy shape: a flat { id: {container, ...} } map written before overrides/hidden existed.
+  const overrides = {}
+  for (const [id, s] of Object.entries(raw || {})) {
+    if (s && s.container) overrides[s.container] = Object.assign({}, s, { id })
+  }
+  return { overrides, hidden: [], default: '' }
+}
+function writeServerConfig(cfg) {
+  fs.writeFileSync(SERVERS_JSON, JSON.stringify({
+    overrides: cfg.overrides || {},
+    hidden: cfg.hidden || [],
+    default: cfg.default || '',
+  }, null, 2))
+}
+
+// Every container on the box right now, name -> state. Returns null (not an empty map) if
+// docker can't be reached, so a transient failure never prunes the whole registry.
+function liveContainers() {
   try {
-    const saved = JSON.parse(fs.readFileSync(SERVERS_JSON, 'utf8'))
-    const out = {}
-    for (const [id, s] of Object.entries(saved)) out[id] = Object.assign({ id }, s)
-    return Object.keys(out).length ? out : DEFAULT_SERVERS
-  } catch { return DEFAULT_SERVERS }
+    const out = execSync('docker ps -a --format "{{.Names}}|{{.State}}"').toString().trim()
+    if (!out) return new Map()
+    return new Map(out.split('\n').filter(Boolean).map(l => {
+      const [name, state] = l.split('|')
+      return [name, state || 'unknown']
+    }))
+  } catch { return null }
 }
 
 // This container's own bind mounts, so we know which host-side paths we can actually read.
@@ -78,30 +111,91 @@ function discoverServers() {
   return found
 }
 
-// Configured servers (servers.json / DEFAULT_SERVERS) always win — auto-discovery only adds
-// servers whose *container* isn't already covered by a configured entry (dedupe by container,
-// not by id, since a discovered entry's id defaults to the container name and would otherwise
-// slip past an id-keyed merge as a duplicate of an already-configured server).
+// Discovery is authoritative about what *exists*; config is authoritative about what it's
+// *called* and whether it's shown. Everything is keyed by container while merging so a rename
+// can't fork one server into two entries.
 function refreshServers() {
-  const configured = loadServers()
+  const cfg = readServerConfig()
+  const live = liveContainers()
   const discovered = discoverServers()
-  const configuredContainers = new Set(Object.values(configured).map(s => s.container))
-  const merged = Object.assign({}, configured)
-  for (const [id, s] of Object.entries(discovered)) {
-    if (!configuredContainers.has(s.container)) merged[id] = s
+  const byContainer = {}
+
+  for (const s of Object.values(discovered)) {
+    byContainer[s.container] = Object.assign({}, s, { discovered: true })
   }
-  SERVERS = merged
+
+  // Seeds/overrides only get added if discovery missed them AND their container really exists.
+  // (Discovery misses a server whose data dir this manager has no matching mount for — still
+  // worth listing so start/stop/logs work, even though file-level features won't.)
+  const seeds = {}
+  for (const [container, s] of Object.entries(SEED_SERVERS)) seeds[container] = Object.assign({ container }, s)
+  for (const [container, s] of Object.entries(cfg.overrides)) {
+    seeds[container] = Object.assign({}, seeds[container], s, { container })
+  }
+  for (const [container, s] of Object.entries(seeds)) {
+    if (byContainer[container]) continue
+    if (live && !live.has(container)) continue // ghost — container is gone, don't list it
+    byContainer[container] = Object.assign({ id: container, name: container, data: '', workshop: '' }, s, { discovered: false })
+  }
+
+  // Apply labels (seed defaults, then user overrides on top) to whatever survived — including
+  // discovered entries, which know the paths but not what the server should be called.
+  for (const [container, o] of Object.entries(seeds)) {
+    const t = byContainer[container]
+    if (!t) continue
+    if (o.id) t.id = o.id
+    if (o.name) t.name = o.name
+    if (o.connect !== undefined) t.connect = o.connect
+    if (o.data) t.data = o.data
+    if (o.workshop) t.workshop = o.workshop
+  }
+
+  const hidden = new Set(cfg.hidden || [])
+  const shown = {}
+  const hiddenList = []
+  for (const s of Object.values(byContainer)) {
+    s.state = live ? (live.get(s.container) || 'unknown') : 'unknown'
+    if (hidden.has(s.container)) hiddenList.push(s)
+    else shown[s.id] = s
+  }
+
+  SERVERS = shown
+  HIDDEN_SERVERS = hiddenList
+  // Configured entries whose container no longer exists. Surfaced in the UI (not silently
+  // dropped) so a server that disappeared is an explicit "forget this" decision.
+  STALE_SERVERS = live
+    ? Object.entries(seeds)
+        .filter(([container]) => !live.has(container))
+        .map(([container, s]) => Object.assign({ container, state: 'missing' }, s))
+    : []
+  SERVER_DEFAULT = SERVERS[cfg.default] ? cfg.default : Object.keys(SERVERS)[0] || ''
 }
 let SERVERS = {}
+let HIDDEN_SERVERS = []
+let STALE_SERVERS = []
+let SERVER_DEFAULT = ''
 refreshServers()
 setInterval(refreshServers, 60000)
-const DEFAULT_SERVER = Object.keys(SERVERS)[0]
 
-// Resolve the server a request targets (?server=b42); falls back to the first.
+// Resolve the server a request targets (?server=b42); falls back to the default.
+// Unknown ids never silently fall through here — the /api guard below rejects them first, so
+// a stale bookmark/localStorage can't end up writing config into a different server.
 function srv(req) {
-  return SERVERS[(req.query && req.query.server) || ''] || SERVERS[DEFAULT_SERVER]
+  return SERVERS[(req.query && req.query.server) || ''] || SERVERS[SERVER_DEFAULT]
 }
 function allServers() { return Object.values(SERVERS) }
+
+// Single guard for all 27+ per-server endpoints: an explicit ?server= that doesn't resolve is a
+// 404, not a silent redirect to some other server. /api/servers* is exempt so the UI can always
+// re-read the list and repair itself.
+app.use('/api', (req, res, next) => {
+  const id = req.query && req.query.server
+  if (!id || req.path.startsWith('/servers')) return next()
+  if (SERVERS[id]) return next()
+  refreshServers() // may have appeared since the last 60s scan
+  if (SERVERS[id]) return next()
+  res.status(404).json({ error: 'Unknown server "' + id + '" — it may have been removed.', code: 'UNKNOWN_SERVER' })
+})
 
 // Per-server derived paths
 function iniPath(s)   { return s.data + '/Server/servertest.ini' }
@@ -721,14 +815,35 @@ function validBackupPath(s, type, name) {
 
 // ===== SERVERS LIST =====
 
+// A server's display name: the user's override wins, else the server's own live PublicName,
+// else the container name. Never blank.
+function serverLabel(s) {
+  const cfg = readServerConfig()
+  const override = (cfg.overrides[s.container] || {}).name
+  if (override) return override
+  try { return getIniValue(s, 'PublicName') || s.name || s.container } catch { return s.name || s.container }
+}
+function serverRow(s, extra) {
+  return Object.assign({
+    id: s.id,
+    name: serverLabel(s),
+    container: s.container,
+    connect: s.connect || '',
+    state: s.state || 'unknown',
+    discovered: !!s.discovered,
+    managed: !!s.data, // false = container visible but its data dir isn't mounted here
+  }, extra)
+}
+
 app.get('/api/servers', (req, res) => {
   res.json({
-    default: DEFAULT_SERVER,
-    servers: allServers().map(s => {
-      let liveName = s.name
-      try { liveName = getIniValue(s, 'PublicName') || s.name || s.container } catch { liveName = s.name || s.container }
-      return { id: s.id, name: liveName, container: s.container, connect: s.connect || '' }
-    })
+    default: SERVER_DEFAULT,
+    servers: allServers().map(s => serverRow(s)),
+    hidden: HIDDEN_SERVERS.map(s => serverRow(s, { hidden: true })),
+    stale: STALE_SERVERS.map(s => ({
+      id: s.id || s.container, name: s.name || s.container, container: s.container,
+      state: 'missing', discovered: false, managed: false,
+    })),
   })
 })
 
@@ -736,6 +851,63 @@ app.get('/api/servers', (req, res) => {
 app.post('/api/servers/refresh', (req, res) => {
   refreshServers()
   res.json({ success: true, count: allServers().length })
+})
+
+// Find a server by id across shown/hidden/stale — needed because you manage exactly the ones
+// that aren't currently selectable.
+function anyServerById(id) {
+  return SERVERS[id]
+    || HIDDEN_SERVERS.find(s => s.id === id)
+    || STALE_SERVERS.find(s => (s.id || s.container) === id)
+    || null
+}
+
+// Rename / set connect / hide / make default. One endpoint, all persisted to servers.json.
+app.put('/api/servers/:id', (req, res) => {
+  const target = anyServerById(req.params.id)
+  if (!target) return res.status(404).json({ error: 'No such server: ' + req.params.id })
+  const { name, connect, hidden, makeDefault, id: newId } = req.body || {}
+  if (newId !== undefined && !/^[A-Za-z0-9._-]{1,40}$/.test(newId)) {
+    return res.status(400).json({ error: 'Id must be 1-40 chars of letters, numbers, dot, dash or underscore.' })
+  }
+  if (newId && newId !== target.id && anyServerById(newId)) {
+    return res.status(409).json({ error: 'Id "' + newId + '" is already in use.' })
+  }
+
+  const cfg = readServerConfig()
+  const o = Object.assign({}, cfg.overrides[target.container])
+  if (newId !== undefined) o.id = newId || target.container
+  if (name !== undefined) o.name = name.trim()
+  if (connect !== undefined) o.connect = connect.trim()
+  cfg.overrides[target.container] = o
+
+  const set = new Set(cfg.hidden || [])
+  if (hidden === true) set.add(target.container)
+  if (hidden === false) set.delete(target.container)
+  cfg.hidden = [...set]
+
+  if (makeDefault) cfg.default = o.id || target.id
+  // Hiding the default would leave the picker pointing at nothing.
+  if (cfg.hidden.includes(target.container) && cfg.default === (o.id || target.id)) cfg.default = ''
+
+  writeServerConfig(cfg)
+  refreshServers()
+  res.json({ success: true, default: SERVER_DEFAULT, servers: allServers().map(s => serverRow(s)) })
+})
+
+// Forget a server: drops its saved override and un-hides it. For a stale entry (container gone)
+// this removes it for good; for a live one it just resets it back to auto-discovered defaults.
+app.delete('/api/servers/:id', (req, res) => {
+  const target = anyServerById(req.params.id)
+  if (!target) return res.status(404).json({ error: 'No such server: ' + req.params.id })
+  const cfg = readServerConfig()
+  delete cfg.overrides[target.container]
+  cfg.hidden = (cfg.hidden || []).filter(c => c !== target.container)
+  if (cfg.default === target.id) cfg.default = ''
+  writeServerConfig(cfg)
+  refreshServers()
+  const stillThere = !!anyServerById(target.id)
+  res.json({ success: true, removed: !stillThere, default: SERVER_DEFAULT })
 })
 
 // ===== SERVER CONTROL =====
