@@ -663,10 +663,6 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
             <option value="48">48h</option>
             <option value="168">7d</option>
           </select>
-          <label style="display:flex;align-items:center;gap:.45rem;cursor:pointer;font-size:.8rem;color:var(--muted)"
-                 title="When a curator removes a mod from a collection, also remove it from this server on sync. Mods shared with another tracked collection are never removed.">
-            <input type="checkbox" id="autosync-prune" onchange="saveAutoSync()"> Remove dropped mods
-          </label>
           <button class="btn-secondary btn-sm" onclick="syncAllCollections()">Sync All Now</button>
         </div>
       </div>
@@ -1593,7 +1589,6 @@ function fetchCollections() {
   }).catch(function() {})
   fetch('/api/collections/autosync').then(function(r) { return r.json() }).then(function(d) {
     document.getElementById('autosync-enabled').checked = !!d.enabled
-    document.getElementById('autosync-prune').checked = !!d.prune
     if (d.intervalHours) document.getElementById('autosync-interval').value = String(d.intervalHours)
   }).catch(function() {})
 }
@@ -1633,6 +1628,10 @@ function renderCollections(colls) {
         '<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + c.id + '" target="_blank" class="mono" style="font-size:.72rem;opacity:.7">' + c.id + '</a>' + nested + '</td>' +
       '<td>' + health + '<br><span style="font-size:.72rem;color:var(--muted)">installed</span></td>' +
       '<td class="text-muted" style="font-size:.76rem">' + synced + '</td>' +
+      '<td><label style="display:flex;align-items:center;gap:.4rem;font-size:.75rem;cursor:pointer' + (c.prune ? '' : ';opacity:.6') + '" ' +
+          'title="On sync, also remove mods this collection no longer lists. Mods another tracked collection still owns are never removed.">' +
+        '<input type="checkbox"' + (c.prune ? ' checked' : '') +
+        ' onchange="setCollectionPrune(this, \'' + c.id + '\')"> ' + (c.prune ? 'on' : 'off') + '</label></td>' +
       '<td style="white-space:nowrap">' +
         '<button class="btn-secondary btn-sm" onclick="syncCollection(\'' + c.id + '\')">Sync</button> ' +
         '<button class="btn-danger btn-sm" onclick="removeCollection(\'' + c.id + '\')">Remove</button>' +
@@ -1646,15 +1645,45 @@ function renderCollections(colls) {
   }
   document.getElementById('collections-table').innerHTML =
     '<table><thead><tr>' + cth('title', 'Collection') + cth('missing', 'Mods') + cth('synced', 'Last Synced') +
+    '<th title="Remove mods the curator has dropped from this collection when it syncs">Remove dropped</th>' +
     '<th></th></tr></thead><tbody>' + rows + '</tbody></table>'
 }
 
+// Turning prune ON is the destructive direction, so that's what gets confirmed — turning it off
+// only makes future syncs additive and needs no warning.
+function setCollectionPrune(cb, id) {
+  var want = cb.checked
+  if (want && !confirm('Remove dropped mods for this collection?\n\nFrom now on, syncing it also DELETES mods its curator has removed. Mods another tracked collection still owns are kept.\n\nNothing is deleted until the next sync.')) {
+    cb.checked = false
+    return
+  }
+  cb.disabled = true
+  fetch('/api/collections/' + id + '/prune', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prune: want })
+  })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.success) throw new Error(d.error || 'unknown error')
+      showMsg('mods-msg', want
+        ? 'Syncing this collection will now remove mods dropped from it.'
+        : 'Syncing this collection will keep dropped mods.', 'success', 5000)
+      fetchCollections()
+    })
+    .catch(function(e) {
+      cb.checked = !want // nothing was stored, so put the box back
+      showMsg('mods-msg', 'Could not update: ' + e.message, 'error', 0)
+    })
+    .finally(function() { cb.disabled = false })
+}
+
 function syncCollection(id) {
-  // Prune deletes mod files, so make it an explicit yes rather than a surprise side effect of Sync.
-  var prune = (document.getElementById('autosync-prune') || {}).checked
+  // Prune deletes mod files, so re-confirm at the point it would actually happen.
+  var c = (cachedCollections || []).find(function(x) { return x.id === id }) || {}
+  var prune = !!c.prune
   if (prune && !confirm('Sync collection ' + id + ' and REMOVE any mods the curator has dropped from it?\n\nMod files are deleted. Mods shared with another tracked collection are kept.')) return
   showMsg('mods-msg', 'Syncing collection ' + id + '...', 'info', 0)
-  fetch('/api/collections/' + id + '/sync' + (prune ? '?prune=true' : ''), { method: 'POST' })
+  fetch('/api/collections/' + id + '/sync', { method: 'POST' })
     .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
     .then(function(x) {
       if (!x.ok) throw new Error(x.d.error || 'Sync failed')
@@ -1670,16 +1699,19 @@ function syncCollection(id) {
 }
 
 function syncAllCollections() {
-  var prune = (document.getElementById('autosync-prune') || {}).checked
   fetch('/api/collections').then(function(r) { return r.json() }).then(function(d) {
     var colls = d.collections || []
     if (!colls.length) return showMsg('mods-msg', 'No collections to sync.', 'info', 4000)
-    // One confirm for the whole batch, not one per collection.
-    if (prune && !confirm('Sync all ' + colls.length + ' collection(s) and REMOVE any mods their curators have dropped?\n\nMod files are deleted. Mods shared with another tracked collection are kept.')) return
+    // One confirm for the whole batch, naming only the collections set to prune.
+    var pruning = colls.filter(function(c) { return c.prune })
+    if (pruning.length && !confirm('Sync all ' + colls.length + ' collection(s)?\n\n' + pruning.length +
+        ' of them will also REMOVE mods their curators have dropped:\n  ' +
+        pruning.map(function(c) { return c.title || c.id }).join('\n  ') +
+        '\n\nMod files are deleted. Mods shared with another tracked collection are kept.')) return
     showMsg('mods-msg', 'Syncing ' + colls.length + ' collection(s)...', 'info', 0)
     var done = 0, queued = 0, pruned = 0
     colls.forEach(function(c) {
-      fetch('/api/collections/' + c.id + '/sync' + (prune ? '?prune=true' : ''), { method: 'POST' })
+      fetch('/api/collections/' + c.id + '/sync', { method: 'POST' })
         .then(function(r) { return r.json() })
         .then(function(x) { queued += (x.queued || 0); pruned += (x.pruned || 0) })
         .catch(function() {})
@@ -1708,14 +1740,12 @@ function removeCollection(id) {
 
 function saveAutoSync() {
   var enabled = document.getElementById('autosync-enabled').checked
-  var prune = document.getElementById('autosync-prune').checked
   var intervalHours = parseInt(document.getElementById('autosync-interval').value)
-  fetch('/api/collections/autosync', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled, prune: prune, intervalHours: intervalHours }) })
+  fetch('/api/collections/autosync', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled, intervalHours: intervalHours }) })
     .then(function(r) { return r.json() })
     .then(function() {
-      var msg = enabled ? 'Auto-sync on — checking every ' + intervalHours + 'h.' : 'Auto-sync off.'
-      msg += prune ? ' Mods dropped from a collection will be removed on sync.' : ' Dropped mods are kept.'
-      showMsg('mods-msg', msg, 'success', 5000)
+      // Whether a sync prunes is per-collection now, so it isn't mentioned here.
+      showMsg('mods-msg', enabled ? 'Auto-sync on — checking every ' + intervalHours + 'h.' : 'Auto-sync off.', 'success', 4000)
     })
     .catch(function() {})
 }

@@ -1635,11 +1635,31 @@ app.post('/api/collections/:id/sync', (req, res) => {
   const s = srv(req)
   const { id } = req.params
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid collection id' })
-  const prune = String(req.query.prune) === 'true'
+  // An explicit ?prune= wins; otherwise use whatever this collection is configured to do.
+  const entry = readCollections(s).find(c => c.id === id)
+  const prune = req.query.prune !== undefined
+    ? String(req.query.prune) === 'true'
+    : !!(entry && entry.prune)
   installCollection(s, id, { prune }, (err, r) => {
     if (err) return res.status(502).json({ error: 'Sync failed', detail: err.message })
     res.json(Object.assign({ success: true, collectionId: id }, r))
   })
+})
+
+// Per-collection prune setting: whether syncing this collection also removes mods its curator has
+// dropped. Stored on the registry entry so manual syncs and auto-sync agree, and so one collection
+// can prune while another stays additive.
+app.put('/api/collections/:id/prune', (req, res) => {
+  const s = srv(req)
+  const { id } = req.params
+  const { prune } = req.body || {}
+  if (typeof prune !== 'boolean') return res.status(400).json({ error: 'prune must be a boolean' })
+  const list = readCollections(s)
+  const entry = list.find(c => c.id === id)
+  if (!entry) return res.status(404).json({ error: 'Collection not tracked: ' + id })
+  entry.prune = prune
+  writeCollections(s, list)
+  res.json({ success: true, id, prune })
 })
 
 // Stop tracking a collection. Mods it installed are left in place unless removeMods is set.
@@ -1669,8 +1689,8 @@ app.delete('/api/collections/:id', (req, res) => {
 // Config lives alongside the registry so it survives restarts. Off by default.
 function autoSyncPath(s) { return s.data + '/collection-autosync.json' }
 function readAutoSync(s) {
-  try { return Object.assign({ enabled: false, intervalHours: 24, prune: false }, JSON.parse(fs.readFileSync(autoSyncPath(s), 'utf8'))) }
-  catch { return { enabled: false, intervalHours: 24, prune: false, lastRun: null } }
+  try { return Object.assign({ enabled: false, intervalHours: 24 }, JSON.parse(fs.readFileSync(autoSyncPath(s), 'utf8'))) }
+  catch { return { enabled: false, intervalHours: 24, lastRun: null } }
 }
 function writeAutoSync(s, cfg) {
   try { fs.writeFileSync(autoSyncPath(s), JSON.stringify(cfg, null, 2)) } catch (e) {}
@@ -1680,14 +1700,12 @@ app.get('/api/collections/autosync', (req, res) => res.json(readAutoSync(srv(req
 
 app.put('/api/collections/autosync', (req, res) => {
   const s = srv(req)
-  const { enabled, intervalHours, prune } = req.body || {}
+  const { enabled, intervalHours } = req.body || {}
   if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'Invalid' })
   const iv = parseInt(intervalHours)
   if (![6, 12, 24, 48, 168].includes(iv)) return res.status(400).json({ error: 'Interval must be 6, 12, 24, 48 or 168 hours' })
   const cur = readAutoSync(s)
-  const patch = { enabled, intervalHours: iv }
-  if (typeof prune === 'boolean') patch.prune = prune
-  writeAutoSync(s, Object.assign(cur, patch))
+  writeAutoSync(s, Object.assign(cur, { enabled, intervalHours: iv }))
   res.json({ success: true })
 })
 
@@ -1706,7 +1724,7 @@ setInterval(() => {
     let prunedTotal = 0
     let pending = list.length
     for (const c of list) {
-      installCollection(s, c.id, { prune: !!cfg.prune }, (err, r) => {
+      installCollection(s, c.id, { prune: !!c.prune }, (err, r) => {
         if (!err && r) { queuedTotal += r.queued; prunedTotal += r.pruned || 0 }
         if (--pending <= 0 && (queuedTotal > 0 || prunedTotal > 0)) {
           const parts = []
