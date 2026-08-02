@@ -674,7 +674,10 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;gap:1rem;flex-wrap:wrap">
         <div class="card-title" style="margin-bottom:0">Installed Mods</div>
         <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap">
-          <input type="text" id="mod-filter" placeholder="Filter by name, ID, collection..." oninput="renderModsTable(cachedMods)" style="width:220px;padding:.35rem .55rem;font-size:.82rem">
+          <input type="text" id="mod-filter" placeholder="Filter by name, ID, tag, collection..." oninput="renderModsTable(cachedMods)" style="width:220px;padding:.35rem .55rem;font-size:.82rem">
+          <select id="mod-type" class="server-select" style="width:auto;margin:0;padding:.35rem .5rem;font-size:.82rem" onchange="renderModsTable(cachedMods)" title="Filter by Workshop tag">
+            <option value="">All types</option>
+          </select>
           <span id="mod-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap"></span>
         </div>
       </div>
@@ -688,7 +691,11 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <summary style="cursor:pointer;font-size:.9rem;color:var(--muted)">
           Download Activity <span id="queue-count" class="mono" style="font-size:.78rem"></span>
         </summary>
-        <div id="queue-table" style="margin-top:1rem"></div>
+        <div style="margin-top:1rem;display:flex;justify-content:flex-end">
+          <button class="btn-secondary btn-sm" onclick="clearDownloadQueue()"
+                  title="Clear finished and failed entries from this list. Downloads still in progress are kept, and no mod files are removed.">Clear</button>
+        </div>
+        <div id="queue-table" style="margin-top:.6rem"></div>
       </details>
     </div>
   </div>
@@ -733,6 +740,21 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       </div>
       <div class="terminal">
         <div id="log-output"></div>
+      </div>
+    </div>
+
+    <!-- The manager's own output: SteamCMD launches, download reconciliation, auto-sync, RCON,
+         schedule and Express errors. When a mod fails to install, the reason is in here. -->
+    <div class="card" style="padding-bottom:1rem">
+      <div class="card-title" style="margin-bottom:.75rem">PZ Server Manager Logs</div>
+      <div class="log-controls">
+        <button class="btn-secondary btn-sm" id="mlog-toggle" onclick="toggleManagerLog()">Pause</button>
+        <button class="btn-secondary btn-sm" onclick="clearManagerLog()">Clear</button>
+        <input type="text" id="mlog-filter" placeholder="Filter..." oninput="applyManagerFilter()" style="width:200px">
+        <span id="mlog-count" class="text-muted" style="font-size:.8rem"></span>
+      </div>
+      <div class="terminal" style="max-height:260px">
+        <div id="mlog-output"></div>
       </div>
     </div>
   </div>
@@ -1104,6 +1126,10 @@ var logSource = null
 var logLines = []
 var logPaused = false
 var autoScroll = true
+var mlogSource = null
+var mlogLines = []
+var mlogPaused = false
+var mlogAutoScroll = true
 var downloadPoller = null
 var activeDownloads = []
 var cachedMods = []
@@ -1119,8 +1145,8 @@ function switchTab(tab) {
   })
   activeTab = tab
   document.getElementById('tab-' + tab).classList.add('active')
-  if (tab === 'logs') startLog()
-  else stopLog()
+  if (tab === 'logs') { startLog(); startManagerLog() }
+  else { stopLog(); stopManagerLog() }
   if (tab === 'mods') { fetchMods(); fetchCollections(); startDownloadPoll() }
   if (tab === 'players') fetchPlayers()
   if (tab === 'settings') fetchNotifSettings()
@@ -1296,6 +1322,22 @@ function fetchDownloads() {
   }).catch(function() {})
 }
 
+// Clears settled entries from the activity list. In-flight downloads are kept server-side, so
+// this can't orphan one; nothing on disk is touched either way.
+function clearDownloadQueue() {
+  fetch('/api/downloads/queue', { method: 'DELETE' })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.success) throw new Error(d.error || 'unknown error')
+      showMsg('mods-msg', d.cleared
+        ? 'Cleared ' + d.cleared + ' entr' + (d.cleared === 1 ? 'y' : 'ies') + '.' +
+          (d.kept ? ' ' + d.kept + ' still in progress, kept.' : '')
+        : 'Nothing to clear — all entries are still in progress.', 'success', 5000)
+      fetchDownloads()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Clear failed: ' + e.message, 'error', 0) })
+}
+
 // Compact one-line strip while downloads are live; hidden entirely when idle.
 function renderDownloadBanner() {
   var banner = document.getElementById('download-banner')
@@ -1371,6 +1413,13 @@ function fetchMods() {
   })
 }
 
+// "Build 41"/"Build 42" ride along on almost every Workshop item, so they're noise for grouping
+// by type. Kept out of the Type column and the type dropdown; the filter box still matches them.
+var BUILD_TAG_RE = /^build\s*4[12]$/i
+function displayTags(m) {
+  return (m.tags || []).filter(function(t) { return !BUILD_TAG_RE.test(t) })
+}
+
 // Sort state for the installed-mods table. Clicking a header toggles direction.
 var modSort = { key: 'title', dir: 1 }
 function sortMods(key) {
@@ -1385,6 +1434,9 @@ function modSortValue(m, key) {
   if (key === 'title') return (m.title || '').toLowerCase()
   if (key === 'workshopId') return m.workshopId
   if (key === 'modIds') return (m.modIds[0] || '').toLowerCase()
+  // Sort by the first meaningful tag so mods of a type group together. Build/version tags are
+  // dropped from the sort key — nearly every mod carries one, so they'd flatten the grouping.
+  if (key === 'tags') return displayTags(m).join(', ').toLowerCase()
   if (key === 'collection') return (m.collections || []).map(function(c) { return (c.title || c.id).toLowerCase() }).sort().join(', ')
   if (key === 'status') {
     var order = { missing: 0, collection: 1, ok: 2 }
@@ -1409,15 +1461,36 @@ function renderModsTable(mods) {
     return (m.title || '').toLowerCase().indexOf(f) !== -1 ||
            m.workshopId.indexOf(f) !== -1 ||
            m.modIds.join(' ').toLowerCase().indexOf(f) !== -1 ||
+           (m.tags || []).join(' ').toLowerCase().indexOf(f) !== -1 ||
            (m.collections || []).some(function(c) { return (c.title || '').toLowerCase().indexOf(f) !== -1 || c.id.indexOf(f) !== -1 })
   }) : mods
 
+  // Type dropdown, rebuilt from whatever tags Steam actually returned for this mod set.
+  var typeSel = document.getElementById('mod-type')
+  var wantType = (typeSel || {}).value || ''
+  if (typeSel) {
+    var seen = {}
+    mods.forEach(function(m) { displayTags(m).forEach(function(t) { seen[t] = (seen[t] || 0) + 1 }) })
+    var opts = Object.keys(seen).sort()
+    var sig = opts.join('|')
+    if (typeSel.dataset.sig !== sig) {
+      typeSel.dataset.sig = sig
+      typeSel.innerHTML = '<option value="">All types</option>' +
+        opts.map(function(t) { return '<option value="' + esc(t) + '">' + esc(t) + ' (' + seen[t] + ')</option>' }).join('')
+      typeSel.value = wantType // a rebuild must not silently reset an active selection
+      if (typeSel.value !== wantType) wantType = ''
+    }
+  }
+  if (wantType) shown = shown.filter(function(m) { return displayTags(m).indexOf(wantType) !== -1 })
+
   var okCount = mods.filter(function(m) { return m.status === 'ok' }).length
+  var narrowed = f || wantType
   document.getElementById('mod-count').textContent =
-    okCount + ' installed' + (problems.length ? ' · ' + problems.length + ' broken' : '') + (f ? ' · ' + shown.length + ' shown' : '')
+    okCount + ' installed' + (problems.length ? ' · ' + problems.length + ' broken' : '') + (narrowed ? ' · ' + shown.length + ' shown' : '')
 
   if (!shown.length) {
-    document.getElementById('mods-table').innerHTML = '<div class="empty">' + (f ? 'No mods match "' + esc(filter) + '"' : 'No mods installed') + '</div>'
+    document.getElementById('mods-table').innerHTML = '<div class="empty">' +
+      (narrowed ? 'No mods match the current filter' : 'No mods installed') + '</div>'
     return
   }
 
@@ -1467,10 +1540,21 @@ function renderModsTable(mods) {
             'style="font-size:.75rem;color:#60a5fa;text-decoration:none">' + esc(c.title || c.id) + '</a>'
         }).join('<br>')
       : '<span style="font-size:.75rem;color:var(--muted)">standalone</span>'
+    // Tags come from Steam, so they're blank until the title cache warms on the first fetch.
+    var tl = displayTags(m)
+    var tagHtml = tl.length
+      ? tl.map(function(t) {
+          return '<span onclick="filterByType(decodeURIComponent(\'' + encodeURIComponent(t) + '\'))" ' +
+            'title="Show only ' + esc(t) + '" ' +
+            'style="display:inline-block;cursor:pointer;font-size:.68rem;padding:.1rem .4rem;margin:.1rem .2rem .1rem 0;' +
+            'border-radius:3px;background:var(--bg);border:1px solid var(--border);color:var(--muted)">' + esc(t) + '</span>'
+        }).join('')
+      : '<span style="font-size:.72rem;color:var(--muted)">—</span>'
     return '<tr>' +
       '<td><div>' + name + '</div>' +
         '<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + m.workshopId + '" target="_blank" class="mono" style="font-size:.72rem;opacity:.7">' + m.workshopId + '</a></td>' +
       '<td>' + detail + '</td>' +
+      '<td style="max-width:200px">' + tagHtml + '</td>' +
       '<td>' + coll + '</td>' +
       '<td>' + statusHtml + '</td>' +
       '<td><button class="btn-danger btn-sm" onclick="removeMod(\'' + m.workshopId + '\')">Remove</button></td>' +
@@ -1485,7 +1569,7 @@ function renderModsTable(mods) {
   }
   document.getElementById('mods-table').innerHTML =
     '<table><thead><tr>' +
-      th('title', 'Mod') + th('modIds', 'Mod IDs (tick = loaded)') + th('collection', 'Collection') + th('status', 'Status') +
+      th('title', 'Mod') + th('modIds', 'Mod IDs (tick = loaded)') + th('tags', 'Type') + th('collection', 'Collection') + th('status', 'Status') +
       '<th></th></tr></thead><tbody>' + rows + '</tbody></table>'
 }
 
@@ -1522,6 +1606,14 @@ function setModEnabled(cb, modId) {
       showMsg('mods-msg', 'Could not update ' + modId + ': ' + e.message, 'error', 0)
     })
     .finally(function() { cb.disabled = false })
+}
+
+// Clicking a tag chip narrows the table to that type.
+function filterByType(tag) {
+  var sel = document.getElementById('mod-type')
+  if (!sel) return
+  sel.value = tag
+  renderModsTable(cachedMods)
 }
 
 function repairMods() {
@@ -1875,8 +1967,11 @@ function applyFilter() {
   out.scrollTop = out.scrollHeight
 }
 
-function appendLogLine(container, line) {
-  var filter = document.getElementById('log-filter').value.toLowerCase()
+// filterId defaults to the PZ server pane so existing callers are unchanged; the manager pane
+// passes its own filter box.
+function appendLogLine(container, line, filterId) {
+  var fEl = document.getElementById(filterId || 'log-filter')
+  var filter = (fEl ? fEl.value : '').toLowerCase()
   if (filter && !line.toLowerCase().includes(filter)) return
   var div = document.createElement('div')
   div.className = 'log-line'
@@ -1898,6 +1993,56 @@ function updateLogCount() {
   var filter = document.getElementById('log-filter').value
   var shown = filter ? logLines.filter(function(l) { return l.toLowerCase().includes(filter.toLowerCase()) }).length : logLines.length
   document.getElementById('log-count').textContent = shown + ' lines'
+}
+
+// --- PZ Server Manager's own log ---
+// Same shape as the server log pane above, pointed at this manager's container instead. Kept as
+// its own stream so pausing or filtering one pane doesn't affect the other.
+function startManagerLog() {
+  if (mlogSource) return
+  var out = document.getElementById('mlog-output')
+  mlogSource = new EventSource('/api/manager-logs?tail=300')
+  mlogSource.onmessage = function(e) {
+    if (mlogPaused) return
+    var line = JSON.parse(e.data)
+    mlogLines.push(line)
+    if (mlogLines.length > 3000) mlogLines.shift()
+    appendLogLine(out, line, 'mlog-filter')
+    if (mlogAutoScroll) out.scrollTop = out.scrollHeight
+    updateManagerLogCount()
+  }
+  mlogSource.onerror = function() { appendLogLine(out, '--- connection lost, reconnecting... ---', 'mlog-filter') }
+}
+
+function stopManagerLog() {
+  if (mlogSource) { mlogSource.close(); mlogSource = null }
+}
+
+function toggleManagerLog() {
+  mlogPaused = !mlogPaused
+  document.getElementById('mlog-toggle').textContent = mlogPaused ? 'Resume' : 'Pause'
+}
+
+function clearManagerLog() {
+  mlogLines = []
+  document.getElementById('mlog-output').innerHTML = ''
+  updateManagerLogCount()
+}
+
+function applyManagerFilter() {
+  var filter = document.getElementById('mlog-filter').value.toLowerCase()
+  var out = document.getElementById('mlog-output')
+  out.innerHTML = ''
+  var filtered = filter ? mlogLines.filter(function(l) { return l.toLowerCase().includes(filter) }) : mlogLines
+  filtered.forEach(function(l) { appendLogLine(out, l, 'mlog-filter') })
+  out.scrollTop = out.scrollHeight
+  updateManagerLogCount()
+}
+
+function updateManagerLogCount() {
+  var filter = document.getElementById('mlog-filter').value
+  var shown = filter ? mlogLines.filter(function(l) { return l.toLowerCase().includes(filter.toLowerCase()) }).length : mlogLines.length
+  document.getElementById('mlog-count').textContent = shown + ' lines'
 }
 
 function fetchBackups() {

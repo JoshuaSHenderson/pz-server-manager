@@ -982,19 +982,40 @@ app.post('/api/server/warned-restart', (req, res) => {
 
 // ===== LOGS =====
 
-app.get('/api/logs', (req, res) => {
-  const s = srv(req)
+// Server-sent-events tail of any container's log. Shared by the PZ server log and this
+// manager's own log so the two can't drift in behaviour.
+function streamContainerLogs(res, container, tailArg) {
   res.setHeader('Content-Type', 'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('Connection', 'keep-alive')
   res.flushHeaders()
-  const tail = Math.min(parseInt(req.query.tail) || 300, 2000)
-  const child = spawn('docker', ['logs', s.container, '--tail', String(tail), '--follow', '--timestamps'])
+  const tail = Math.min(parseInt(tailArg) || 300, 2000)
+  const child = spawn('docker', ['logs', container, '--tail', String(tail), '--follow', '--timestamps'])
   const send = l => { if (l.trim()) res.write('data: ' + JSON.stringify(l) + '\n\n') }
   child.stdout.on('data', d => d.toString().split('\n').forEach(send))
   child.stderr.on('data', d => d.toString().split('\n').forEach(send))
   child.on('close', () => res.end())
-  req.on('close', () => child.kill())
+  res.on('close', () => child.kill())
+}
+
+app.get('/api/logs', (req, res) => {
+  streamContainerLogs(res, srv(req).container, req.query.tail)
+})
+
+// This manager's own container id. Inside Docker, `hostname` is the short container id, which
+// `docker logs` accepts — the same trick ownMounts() uses to find our own bind mounts.
+function ownContainerId() {
+  try { return execSync('hostname').toString().trim() } catch { return '' }
+}
+
+// The manager's own output: Express request errors, SteamCMD launch failures, download
+// reconciliation, collection auto-sync, RCON and schedule activity. Separate from the PZ server
+// log because when a mod fails to install, the reason is almost always in here, not in the game
+// server's log.
+app.get('/api/manager-logs', (req, res) => {
+  const id = ownContainerId()
+  if (!id) return res.status(500).json({ error: 'Could not determine own container id' })
+  streamContainerLogs(res, id, req.query.tail)
 })
 
 // ===== PLAYERS / WHITELIST =====
@@ -1093,7 +1114,13 @@ function steamFileDetails(ids, cb) {
         const files = (JSON.parse(out).response || {}).publishedfiledetails || []
         const map = {}
         for (const f of files) {
-          if (f.publishedfileid) map[f.publishedfileid] = { title: f.title || '', fileSize: parseInt(f.file_size) || 0, ok: f.result === 1 }
+          if (f.publishedfileid) map[f.publishedfileid] = {
+            title: f.title || '',
+            fileSize: parseInt(f.file_size) || 0,
+            // Workshop tags: "Vehicles", "Build 42", "Audio", "Multiplayer", ...
+            tags: (f.tags || []).map(t => t.tag).filter(Boolean),
+            ok: f.result === 1
+          }
         }
         cb(null, map)
       } catch (e) { cb(e) }
@@ -1178,6 +1205,10 @@ function resolveCollectionLeaves(collectionId, cb) {
 // --- Workshop title cache (avoids re-hitting Steam on every page load) ---
 const titleCache = {} // id -> { title, at }
 const TITLE_TTL = 6 * 60 * 60 * 1000
+// Workshop tags for an id, from the same cache getTitles() fills. Returns [] until that cache is
+// warm, so callers must run this inside/after a getTitles() callback rather than standalone.
+function getCachedTags(id) { return (titleCache[id] || {}).tags || [] }
+
 function getTitles(ids, cb) {
   const now = Date.now()
   const missing = ids.filter(id => !titleCache[id] || now - titleCache[id].at > TITLE_TTL)
@@ -1193,7 +1224,7 @@ function getTitles(ids, cb) {
   pending = chunks.length
   for (const chunk of chunks) {
     steamFileDetails(chunk, (err, map) => {
-      if (!err) for (const [id, d] of Object.entries(map)) titleCache[id] = { title: d.title, at: Date.now() }
+      if (!err) for (const [id, d] of Object.entries(map)) titleCache[id] = { title: d.title, tags: d.tags || [], at: Date.now() }
       if (--pending <= 0) out()
     })
   }
@@ -1477,6 +1508,7 @@ app.get('/api/mods', (req, res) => {
   getTitles([...new Set(needTitles)], titles => {
     res.json({
       mods: base.map(m => Object.assign(m, {
+        tags: getCachedTags(m.workshopId),
         title: titles[m.workshopId] || '',
         collections: m.collections.map(c => ({ id: c.id, title: c.title || titles[c.id] || '' }))
       }))
@@ -2109,6 +2141,17 @@ app.get('/api/downloads', (req, res) => {
     const lines = ((out || '') + '\n' + (stderr || '')).split('\n')
     res.json({ active: parseDownloads(lines), queue: readQueue(s).slice().reverse() })
   })
+})
+
+// Clears the download activity list. Only settled entries go — anything still 'queued' is work in
+// flight, and dropping it would orphan the download (reconcileDownloads would never register the
+// mod when it lands). Purely a display concern: no mod files or ini entries are touched.
+app.delete('/api/downloads/queue', (req, res) => {
+  const s = srv(req)
+  const before = readQueue(s)
+  const kept = before.filter(e => e.status === 'queued')
+  writeQueue(s, kept)
+  res.json({ success: true, cleared: before.length - kept.length, kept: kept.length })
 })
 
 // ===== NOTIFICATIONS =====
