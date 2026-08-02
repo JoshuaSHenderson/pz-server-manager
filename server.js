@@ -6,6 +6,7 @@ const https = require('https')
 const querystring = require('querystring')
 const crypto = require('crypto')
 const net = require('net')
+const { prunableItems } = require('./prune')
 
 const app = express()
 app.use(express.json())
@@ -337,8 +338,12 @@ function pushover(title, message) {
   req.on('error', () => {})
   req.write(data); req.end()
 }
-// Server-tagged notification, e.g. "[Build 42] PZ Server Started"
-function pushoverFor(s, title, message) { pushover('[' + s.name + '] ' + title, message) }
+// Server-tagged notification, e.g. "[DAS HOMIES] PZ Server Started".
+// Uses serverLabel(), not s.name: s.name is whatever SEED_SERVERS/discovery last labelled the
+// container ("Build 41" for a container that now runs B42), so notifications used to carry a
+// stale hardcoded name. serverLabel() resolves the user's override, then the server's live
+// PublicName, and only falls back to s.name / the container name.
+function pushoverFor(s, title, message) { pushover('[' + serverLabel(s) + '] ' + title, message) }
 
 // --- Discord Status helpers ---
 function discordRequest(method, urlPath, body, cb) {
@@ -434,9 +439,8 @@ function updateDiscordStatus(cb) {
               const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000)
               uptime = h > 0 ? h + 'h ' + m + 'm' : m + 'm'
             }
-            let title = s.name, modCount = '—', port = ''
+            let title = serverLabel(s), modCount = '—', port = ''
             try {
-              title = getIniValue(s, 'PublicName') || s.name
               modCount = String(getIniList(s, 'WorkshopItems').length)
               port = getIniValue(s, 'DefaultPort', '')
             } catch {}
@@ -454,7 +458,7 @@ function updateDiscordStatus(cb) {
             const isOnline = (states[s.container] || {}).status === 'running'
             const n = isOnline ? onlinePlayersFor(s).length : 0
             const version = versions[s.id]
-            return s.name + (version ? ' v' + version : '') + ' ' + (isOnline ? '🟢 ' + n + ' online' : '🔴')
+            return serverLabel(s) + (version ? ' v' + version : '') + ' ' + (isOnline ? '🟢 ' + n + ' online' : '🔴')
           }).join(' | ')
           const template = cfg.discord.template || 'Project Zomboid Server: <ZomboidServerStats>'
           const content = template
@@ -1283,12 +1287,72 @@ function steamcmdDownload(s, workshopIds, source, collectionId) {
       const queue = readQueue(s)
       for (const e of queue) {
         if (workshopIds.includes(e.id) && e.status === 'queued') {
-          e.status = 'failed'; e.error = 'Could not start SteamCMD'; e.updatedAt = new Date().toISOString()
+          e.status = 'failed'
+          e.error = 'Could not start SteamCMD in container "' + s.container + '": ' +
+            (stripAnsi(stderr || err.message).trim().slice(0, 300) || 'no output') +
+            '. Check the server container is running.'
+          e.updatedAt = new Date().toISOString()
         }
       }
       writeQueue(s, queue)
     }
   })
+}
+
+// --- Download failure diagnosis ---
+//
+// Every failed download used to report the same sentence regardless of cause, which made a
+// resumable timeout, an out-of-disk and a not-actually-a-mod item indistinguishable. These
+// helpers turn SteamCMD's own output plus the state on disk into something actionable.
+function stripAnsi(str) { return String(str).replace(/\x1b\[[0-9;]*m/g, '') }
+
+function humanBytes(n) {
+  if (!n || n < 0) return '0 B'
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
+  return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i]
+}
+
+function freeBytes(s) {
+  try { const st = fs.statfsSync(s.data); return st.bavail * st.bsize } catch { return 0 }
+}
+
+// How much of an item SteamCMD has already pulled into the server's force_install_dir. That tree
+// is not mounted into this container, so ask the server container. A surviving partial is the
+// difference between "retry resumes" and "retry starts from zero".
+function partialBytes(s, workshopId) {
+  try {
+    const out = execSync('docker exec ' + s.container + ' du -sb ' +
+      '/home/steam/pz-dedicated/steamapps/workshop/content/108600/' + workshopId +
+      ' 2>/dev/null || true', { timeout: 20000 }).toString().trim()
+    return parseInt(out.split(/\s+/)[0], 10) || 0
+  } catch { return 0 }
+}
+
+// Explains why an item settled with no usable mod folders.
+function explainDownloadFailure(s, workshopId, logLines) {
+  // Last match wins — the most recent attempt is the one worth reporting.
+  let steamErr = null
+  const re = new RegExp('ERROR!.*\\b' + workshopId + '\\b.*')
+  for (const line of logLines || []) {
+    const m = stripAnsi(line).match(re)
+    if (m) steamErr = m[0].trim()
+  }
+  const partial = partialBytes(s, workshopId)
+  const free = freeBytes(s)
+  const bits = []
+
+  bits.push(steamErr ? 'SteamCMD: "' + steamErr + '".' : 'SteamCMD produced no mod folders for this item.')
+  if (partial > 0) bits.push(humanBytes(partial) + ' is already downloaded — Retry resumes from there rather than starting over.')
+  if (/timeout/i.test(steamErr || '')) bits.push('SteamCMD times out on very large items; each retry picks up where the last stopped, so repeated retries do finish.')
+  if (free > 0 && free < 10 * 1024 * 1024 * 1024) {
+    bits.push('Only ' + humanBytes(free) + ' free on disk — note each mod is stored twice (workshop copy + server mods folder).')
+  }
+  if (!steamErr && !partial) {
+    bits.push('If this Workshop item is a save, map-only upload or otherwise contains no mod.info, it will never install as a mod.')
+  }
+  return bits.join(' ')
 }
 
 // Reconciles the persisted queue against reality on an interval.
@@ -1340,7 +1404,7 @@ function reconcileDownloads(s) {
             entry.error = null
           } else {
             entry.status = 'failed'
-            entry.error = 'Downloaded nothing usable (no mod folders found)'
+            entry.error = explainDownloadFailure(s, entry.id, (out || '').split('\n'))
           }
         } catch (e) {
           entry.status = 'failed'
@@ -1387,6 +1451,11 @@ app.get('/api/mods', (req, res) => {
     if (!byMod[wid].some(x => x.id === q.collectionId)) byMod[wid].push({ id: q.collectionId, title: '' })
   }
 
+  // A Workshop item can ship several mod ids (Authentic Z packs Current/Lite/Backpacks+ into one),
+  // and Mods= decides which of them the server actually loads. Report that per id so the UI can
+  // toggle them individually instead of only offering to delete the whole item.
+  const enabledIds = new Set(getIniList(s, 'Mods'))
+
   const base = workshopIds.map(wid => {
     const modIds = modIdsFromWorkshop(s, wid)
     const folders = modNamesFromWorkshop(s, wid)
@@ -1395,6 +1464,7 @@ app.get('/api/mods', (req, res) => {
     if (!modIds.length) status = (q && q.status === 'collection') ? 'collection' : 'missing'
     return {
       workshopId: wid, modIds, modFolders: folders, status,
+      enabledIds: modIds.filter(id => enabledIds.has(id)),
       error: (q && q.error) || null,
       collections: byMod[wid] || []
     }
@@ -1452,9 +1522,30 @@ app.post('/api/mods/repair', (req, res) => {
   })
 })
 
-app.delete('/api/mods/:workshopId', (req, res) => {
+// Toggle one mod id in Mods= without touching WorkshopItems or any files on disk. Needed because
+// variant packs ship mutually exclusive mods in a single Workshop item — Authentic Z's Current and
+// Lite both register the same az:* item_body_location ids, so loading both throws
+// "Tried to register duplicate object" and kills the client's Lua reset on connect. Deleting the
+// item to drop one variant would take the others' files with it.
+// Re-enabling appends to the end of Mods= (same as install does); load order is not preserved.
+app.post('/api/mods/enabled', (req, res) => {
   const s = srv(req)
-  const { workshopId } = req.params
+  const { modId, enabled } = req.body || {}
+  if (typeof modId !== 'string' || !modId) return res.status(400).json({ error: 'modId required' })
+  if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' })
+  // Only ids belonging to an installed Workshop item may be written, so a stale UI can't inject
+  // a name the server would then fail to load.
+  const known = new Set(getIniList(s, 'WorkshopItems').flatMap(wid => modIdsFromWorkshop(s, wid)))
+  if (!known.has(modId)) return res.status(400).json({ error: 'Unknown mod id: ' + modId })
+  const rest = getIniList(s, 'Mods').filter(id => id !== modId)
+  setIniList(s, 'Mods', enabled ? [...rest, modId] : rest)
+  res.json({ success: true, modId, enabled })
+})
+
+// The one removal path for a Workshop item: delete the copied mod folders, then drop the item
+// from WorkshopItems= and its mod ids from Mods=. Manual removal, collection removal and
+// collection prune all route through here so they can't drift apart.
+function removeWorkshopItem(s, workshopId) {
   const removedIds = modIdsFromWorkshop(s, workshopId)
   const removedFolders = modNamesFromWorkshop(s, workshopId)
   for (const folder of removedFolders) {
@@ -1463,6 +1554,13 @@ app.delete('/api/mods/:workshopId', (req, res) => {
   }
   setIniList(s, 'WorkshopItems', getIniList(s, 'WorkshopItems').filter(id => id !== workshopId))
   setIniList(s, 'Mods', getIniList(s, 'Mods').filter(id => !removedIds.includes(id)))
+  return { removedIds, removedFolders }
+}
+
+app.delete('/api/mods/:workshopId', (req, res) => {
+  const s = srv(req)
+  const { workshopId } = req.params
+  const { removedIds, removedFolders } = removeWorkshopItem(s, workshopId)
   writeQueue(s, readQueue(s).filter(e => e.id !== workshopId))
   res.json({ success: true, workshopId, removedIds, removedFolders })
 })
@@ -1485,10 +1583,18 @@ app.get('/api/collections', (req, res) => {
 
 // Install (or re-install) a collection: resolves nested collections down to real mod items,
 // records it in the registry, and queues anything not already present.
-function installCollection(s, collectionId, cb) {
+// opts.prune also removes items the collection no longer lists — mods the curator dropped since
+// the last sync. Off by default: syncing is otherwise purely additive, and deleting a mod is not
+// something to do as a silent side effect of "check for updates".
+function installCollection(s, collectionId, opts, cb) {
+  if (typeof opts === 'function') { cb = opts; opts = {} }
+  const prune = !!(opts && opts.prune)
   resolveCollectionLeaves(collectionId, (err, leaves, nested) => {
     if (err) return cb(err)
     getTitles([collectionId], titles => {
+      // Captured before the upsert overwrites it — this is what the collection used to contain.
+      const existing = readCollections(s).find(c => c.id === collectionId)
+      const previous = (existing && existing.items) || []
       const have = new Set(getIniList(s, 'WorkshopItems'))
       const todo = leaves.filter(id => !have.has(id) || !hasModContent(s, id))
       upsertCollection(s, {
@@ -1498,8 +1604,18 @@ function installCollection(s, collectionId, cb) {
         nestedCollections: nested || [],
         lastSynced: new Date().toISOString()
       })
+      let pruned = []
+      if (prune && previous.length) {
+        // Never yank a mod another tracked collection still owns — same rule as untracking.
+        pruned = prunableItems(previous, leaves, readCollections(s).filter(c => c.id !== collectionId))
+        for (const wid of pruned) removeWorkshopItem(s, wid)
+        if (pruned.length) writeQueue(s, readQueue(s).filter(e => !pruned.includes(e.id)))
+      }
       if (todo.length) steamcmdDownload(s, todo, 'collection', collectionId)
-      cb(null, { total: leaves.length, queued: todo.length, nested: (nested || []).length })
+      cb(null, {
+        total: leaves.length, queued: todo.length, nested: (nested || []).length,
+        pruned: pruned.length, prunedIds: pruned
+      })
     })
   })
 }
@@ -1519,7 +1635,8 @@ app.post('/api/collections/:id/sync', (req, res) => {
   const s = srv(req)
   const { id } = req.params
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid collection id' })
-  installCollection(s, id, (err, r) => {
+  const prune = String(req.query.prune) === 'true'
+  installCollection(s, id, { prune }, (err, r) => {
     if (err) return res.status(502).json({ error: 'Sync failed', detail: err.message })
     res.json(Object.assign({ success: true, collectionId: id }, r))
   })
@@ -1541,13 +1658,7 @@ app.delete('/api/collections/:id', (req, res) => {
     for (const c of list) if (c.id !== id) for (const i of (c.items || [])) othersOwn.add(i)
     for (const wid of (entry.items || [])) {
       if (othersOwn.has(wid)) continue
-      const ids = modIdsFromWorkshop(s, wid)
-      for (const folder of modNamesFromWorkshop(s, wid)) {
-        const dest = path.join(modsDir(s), folder)
-        if (fs.existsSync(dest)) try { execSync('rm -rf "' + dest + '"') } catch {}
-      }
-      setIniList(s, 'WorkshopItems', getIniList(s, 'WorkshopItems').filter(x => x !== wid))
-      setIniList(s, 'Mods', getIniList(s, 'Mods').filter(x => !ids.includes(x)))
+      removeWorkshopItem(s, wid)
       removed++
     }
   }
@@ -1558,8 +1669,8 @@ app.delete('/api/collections/:id', (req, res) => {
 // Config lives alongside the registry so it survives restarts. Off by default.
 function autoSyncPath(s) { return s.data + '/collection-autosync.json' }
 function readAutoSync(s) {
-  try { return Object.assign({ enabled: false, intervalHours: 24 }, JSON.parse(fs.readFileSync(autoSyncPath(s), 'utf8'))) }
-  catch { return { enabled: false, intervalHours: 24, lastRun: null } }
+  try { return Object.assign({ enabled: false, intervalHours: 24, prune: false }, JSON.parse(fs.readFileSync(autoSyncPath(s), 'utf8'))) }
+  catch { return { enabled: false, intervalHours: 24, prune: false, lastRun: null } }
 }
 function writeAutoSync(s, cfg) {
   try { fs.writeFileSync(autoSyncPath(s), JSON.stringify(cfg, null, 2)) } catch (e) {}
@@ -1569,12 +1680,14 @@ app.get('/api/collections/autosync', (req, res) => res.json(readAutoSync(srv(req
 
 app.put('/api/collections/autosync', (req, res) => {
   const s = srv(req)
-  const { enabled, intervalHours } = req.body || {}
+  const { enabled, intervalHours, prune } = req.body || {}
   if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'Invalid' })
   const iv = parseInt(intervalHours)
   if (![6, 12, 24, 48, 168].includes(iv)) return res.status(400).json({ error: 'Interval must be 6, 12, 24, 48 or 168 hours' })
   const cur = readAutoSync(s)
-  writeAutoSync(s, Object.assign(cur, { enabled, intervalHours: iv }))
+  const patch = { enabled, intervalHours: iv }
+  if (typeof prune === 'boolean') patch.prune = prune
+  writeAutoSync(s, Object.assign(cur, patch))
   res.json({ success: true })
 })
 
@@ -1590,12 +1703,16 @@ setInterval(() => {
     writeAutoSync(s, cfg)
     console.log('[autosync] ' + s.name + ': syncing ' + list.length + ' collection(s)')
     let queuedTotal = 0
+    let prunedTotal = 0
     let pending = list.length
     for (const c of list) {
-      installCollection(s, c.id, (err, r) => {
-        if (!err && r) queuedTotal += r.queued
-        if (--pending <= 0 && queuedTotal > 0) {
-          pushoverFor(s, 'PZ Collection Sync', 'Auto-sync queued ' + queuedTotal + ' new/missing mod(s) from tracked collections.')
+      installCollection(s, c.id, { prune: !!cfg.prune }, (err, r) => {
+        if (!err && r) { queuedTotal += r.queued; prunedTotal += r.pruned || 0 }
+        if (--pending <= 0 && (queuedTotal > 0 || prunedTotal > 0)) {
+          const parts = []
+          if (queuedTotal) parts.push('queued ' + queuedTotal + ' new/missing mod(s)')
+          if (prunedTotal) parts.push('removed ' + prunedTotal + ' mod(s) dropped from their collection')
+          pushoverFor(s, 'PZ Collection Sync', 'Auto-sync ' + parts.join(' and ') + '.')
         }
       })
     }
@@ -1992,7 +2109,14 @@ app.put('/api/notifications', (req, res) => {
 app.post('/api/notifications/test', (req, res) => {
   const cfg = readNotifConfig()
   if (!cfg.token || !cfg.userKey) return res.status(400).json({ error: 'No credentials configured' })
-  const data = querystring.stringify({ token: cfg.token, user: cfg.userKey, title: 'PZ Server Manager', message: 'Test notification from PZ Server Manager.' })
+  // Title is built the same way real alerts are, so the test actually proves what a live
+  // notification will say — including which server it came from.
+  const label = serverLabel(srv(req))
+  const data = querystring.stringify({
+    token: cfg.token, user: cfg.userKey,
+    title: '[' + label + '] PZ Server Manager',
+    message: 'Test notification from PZ Server Manager for "' + label + '".'
+  })
   const request = https.request({
     hostname: 'api.pushover.net', path: '/1/messages.json', method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data) }
