@@ -20,8 +20,12 @@ app.use(express.static('public'))
 //   3. SEED_SERVERS    — bootstrap labels for a first run before anything is customised
 // A server only reaches the picker if its container exists *right now*. That is the rule that
 // stops removed servers (e.g. the old zomboid42 sandbox) lingering as unusable ghost entries.
+// Deliberately carries no `name`: a hardcoded label here outlives whatever the container actually
+// runs (the original 'Build 41' seed was still being applied to a container running B42), and it
+// would override the server's own PublicName. serverLabel() resolves the display name instead —
+// user override first, then the live PublicName, then the container name.
 const SEED_SERVERS = {
-  zomboid: { id: 'b41', name: 'Build 41', data: '/pz-data', workshop: '/workshop', connect: '192.168.1.20:16261' },
+  zomboid: { id: 'b41', data: '/pz-data', workshop: '/workshop', connect: '192.168.1.20:16261' },
 }
 const PZ_IMAGE = 'danixu86/project-zomboid-dedicated-server'
 const SERVERS_JSON = '/pz-data/servers.json'
@@ -2331,4 +2335,12 @@ app.get('/api/players/online', (req, res) => {
   res.json({ online: players.length, players })
 })
 
-app.listen(7777, () => console.log('PZ Server Manager on :7777 — servers: ' + allServers().map(s => s.id).join(', ')))
+// 7777 is the port *inside* the container; docker-compose publishes it on the host (7778 in the
+// reference compose). Nothing in here can see the host-side mapping, so say which one this is
+// rather than printing a bare port that doesn't match the URL people actually use.
+// Servers are listed as id + resolved label, because an id is just a slug the user can rename and
+// on its own it says nothing about which server it refers to.
+app.listen(7777, () => console.log(
+  'PZ Server Manager listening on container port 7777 (published to the host by docker-compose) — servers: ' +
+  (allServers().map(s => s.id + ' "' + serverLabel(s) + '"').join(', ') || 'none found')
+))
