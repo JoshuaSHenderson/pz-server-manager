@@ -499,9 +499,8 @@ function updateDiscordStatus(cb) {
       function sendCard(versions) {
         let body
         if (cfg.discord.richCard) {
-          // One embed per server with inline fields. Discord lays inline fields out three to a
-          // row, which is the only thing in an embed that actually aligns into columns —
-          // markdown tables are not rendered, and a code block would kill the collection link.
+          // One embed per server, its description a list of "**Key** : value" lines. Embed fields
+          // were tried first but always render the name on its own line above the value.
           const embeds = []
           for (const s of servers) {
             const st = states[s.container] || {}
@@ -521,26 +520,29 @@ function updateDiscordStatus(cb) {
             const players = isOnline ? onlinePlayersFor(s) : []
             const version = versions[s.id]
 
-            const fields = [
-              { name: 'Status', value: isOnline ? '🟢 Online' : '🔴 Offline', inline: true },
-              { name: 'Players', value: '**' + players.length + '**' + (maxPlayers ? ' / ' + maxPlayers : ''), inline: true },
-              { name: 'Uptime', value: isOnline ? uptime : '—', inline: true },
-              { name: 'Connect', value: (externalIp && port) ? '`' + externalIp + ':' + port + '`' : '—', inline: true },
-              { name: 'Mods', value: modCount, inline: true },
-              { name: 'Version', value: version ? '`' + version + '`' : '—', inline: true }
+            // "**Key** : value" on one line each. Embed fields put the name on its own line above
+            // the value, which is what this replaces.
+            const row = (k, v) => '**' + k + '** : ' + v
+            const lines = [
+              row('Status', isOnline ? '🟢 Online' : '🔴 Offline'),
+              row('Players', players.length + (maxPlayers ? ' / ' + maxPlayers : '')),
+              row('Uptime', isOnline ? uptime : '—'),
+              row('Connect', (externalIp && port) ? '`' + externalIp + ':' + port + '`' : '—'),
+              row('Mods', modCount),
+              row('Version', version ? '`' + version + '`' : '—')
             ]
             if (players.length) {
-              fields.push({ name: 'Online now', value: players.slice(0, 20).join(', ') + (players.length > 20 ? ', …' : ''), inline: false })
+              lines.push(row('Online now', players.slice(0, 20).join(', ') + (players.length > 20 ? ', …' : '')))
             }
             // Tracked collections, so people can subscribe to the server's mod list from Discord
             // rather than being sent a list of Workshop ids.
             const collLinks = collectionLinks(s)
-            if (collLinks) fields.push({ name: 'Mod Collection', value: collLinks, inline: false })
+            if (collLinks) lines.push(row('Mod Collection', collLinks))
 
             embeds.push({
               title: serverLabel(s),
               color: isOnline ? 5763719 : 15548997,
-              fields
+              description: lines.join('\n')
             })
           }
           // Discord shows the timestamp under the last embed only, so it goes there.
