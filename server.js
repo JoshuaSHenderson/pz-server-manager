@@ -546,7 +546,7 @@ function updateDiscordStatus(cb) {
               description: lines.join('\n')
             }
             // Discord fetches this URL itself, so it has to be reachable from the internet —
-            // the manager's own /server-icon.jpg is LAN-only and would render broken.
+            // the manager's own /server-icon.png is LAN-only and would render broken.
             if (cfg.discord.iconUrl) embed.thumbnail = { url: cfg.discord.iconUrl }
             embeds.push(embed)
           }
