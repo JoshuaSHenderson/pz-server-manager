@@ -450,14 +450,24 @@ function getExternalIp(cb) {
 // --- Running game version (cached per server — parsed from the server's own startup log) ---
 const versionCache = {} // [serverId] = { version, at }
 const VERSION_TTL = 5 * 60 * 1000
+// PZ prints "version=42.20.0 a2947723ca demo=false" once, about 100 lines into startup. Tailing
+// the end of a log that runs to tens of thousands of lines never reached it, which is why the
+// version showed as blank — so read forward from the start of the current run instead.
 function getServerVersion(s, cb) {
   const cached = versionCache[s.id]
   if (cached && Date.now() - cached.at < VERSION_TTL) return cb(cached.version)
-  exec('docker logs ' + s.container + ' --tail 3000 2>&1', { maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
-    const m = (out || '').match(/\bversion=(\S+)/)
-    const version = m ? m[1] : (cached ? cached.version : '')
-    versionCache[s.id] = { version, at: Date.now() }
-    cb(version)
+  exec('docker inspect ' + s.container + ' --format "{{.State.StartedAt}}"', (e1, startedAt) => {
+    const since = (startedAt || '').trim()
+    // --since scopes it to the current run so a restart picks up a changed version; head caps
+    // the read regardless of how long the server has been up.
+    const cmd = 'docker logs ' + s.container + (since ? ' --since ' + since : '') + ' 2>&1 | head -n 2000'
+    exec(cmd, { maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+      const m = (out || '').match(/\bversion=(\d[\w.]*)/)
+      const version = m ? m[1] : (cached ? cached.version : '')
+      if (version && (!cached || cached.version !== version)) logFor(s, 'detected PZ version ' + version)
+      versionCache[s.id] = { version, at: Date.now() }
+      cb(version)
+    })
   })
 }
 

@@ -412,10 +412,9 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
     repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0px, rgba(0,0,0,.16) 1px, transparent 1px, transparent 3px),
     radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.35) 100%);
 }
-#log-output {
+#log-output, #mlog-output {
   background: #030806;
   padding: 1rem 1.1rem;
-  height: 62vh;
   overflow-y: auto;
   font-family: var(--font-mono);
   font-size: .76rem;
@@ -423,7 +422,11 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
   white-space: pre-wrap;
   word-break: break-all;
 }
-#log-output::-webkit-scrollbar-thumb { background: rgba(74,222,128,.25); border: 2px solid transparent; background-clip: padding-box }
+#log-output { height: 62vh }
+/* Shorter, but scrolls exactly like the server log rather than clipping at a max-height. */
+#mlog-output { height: 26vh; min-height: 180px }
+#log-output::-webkit-scrollbar-thumb, #mlog-output::-webkit-scrollbar-thumb { background: rgba(74,222,128,.25); border: 2px solid transparent; background-clip: padding-box }
+#mlog-count { color: var(--muted); font-size: .78rem; margin-left: auto; font-family: var(--font-mono) }
 .log-line { padding: .05rem 0 }
 .log-ts { color: rgba(74,222,128,.35); margin-right: .5rem }
 .log-warn { color: #fcd34d }
@@ -825,7 +828,7 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <input type="text" id="mlog-filter" placeholder="Filter..." oninput="applyManagerFilter()" style="width:200px">
         <span id="mlog-count" class="text-muted" style="font-size:.8rem"></span>
       </div>
-      <div class="terminal" style="max-height:260px">
+      <div class="terminal">
         <div id="mlog-output"></div>
       </div>
     
