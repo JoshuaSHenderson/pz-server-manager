@@ -7,6 +7,7 @@ const querystring = require('querystring')
 const crypto = require('crypto')
 const net = require('net')
 const { prunableItems } = require('./prune')
+const { parseDepList, analyzeDependencies, sortIssues } = require('./deps')
 
 const app = express()
 app.use(express.json())
@@ -273,6 +274,36 @@ function modIdsFromWorkshop(s, workshopId) {
   return ids
 }
 function modNamesFromWorkshop(s, workshopId) { return modFolders(s, workshopId) }
+
+// Full mod.info metadata for every installed mod, keyed by mod id. Same files
+// modIdsFromWorkshop() reads, but keeps the dependency fields as well.
+function installedModMeta(s) {
+  const out = {}
+  for (const wid of getIniList(s, 'WorkshopItems')) {
+    const dir = path.join(workshopContent(s), wid, 'mods')
+    for (const folder of modFolders(s, wid)) {
+      const info = findModInfo(path.join(dir, folder))
+      if (!info) continue
+      let txt
+      try { txt = fs.readFileSync(info, 'utf8') } catch { continue }
+      // .trim() also drops the trailing \r on CRLF mod.info files, which many mods ship.
+      const field = k => {
+        const m = txt.match(new RegExp('^' + k + '=(.*)$', 'm'))
+        return m ? m[1].trim() : ''
+      }
+      const id = field('id')
+      if (!id) continue
+      out[id] = {
+        workshopId: wid,
+        name: field('name') || id,
+        require: parseDepList(field('require')),
+        incompatible: parseDepList(field('incompatible')),
+        loadModAfter: parseDepList(field('loadModAfter'))
+      }
+    }
+  }
+  return out
+}
 
 // --- DB helpers ---
 function dbAll(s, sql) {
@@ -1599,6 +1630,70 @@ app.delete('/api/mods/:workshopId', (req, res) => {
   const { removedIds, removedFolders } = removeWorkshopItem(s, workshopId)
   writeQueue(s, readQueue(s).filter(e => e.id !== workshopId))
   res.json({ success: true, workshopId, removedIds, removedFolders })
+})
+
+// --- Mod dependencies ---
+//
+// PZ won't tell you a dependency is unmet; the mod just misbehaves in-game. These endpoints read
+// require= / incompatible= / loadModAfter= from every installed mod.info and report what the
+// current Mods= list doesn't satisfy.
+//
+// Not every declared requirement is genuinely required — authors list optional companion mods in
+// require= all the time — so nothing is auto-installed or auto-enabled. Issues are reported and
+// the user decides, with an ignore list for the ones that don't apply.
+function depIgnorePath(s) { return s.data + '/dependency-ignores.json' }
+function readDepIgnores(s) {
+  try { const v = JSON.parse(fs.readFileSync(depIgnorePath(s), 'utf8')); return Array.isArray(v) ? v : [] }
+  catch { return [] }
+}
+function writeDepIgnores(s, list) {
+  try { fs.writeFileSync(depIgnorePath(s), JSON.stringify(list, null, 2)) } catch (e) {}
+}
+function depKey(modId, dependency) { return modId + '>' + dependency }
+
+app.get('/api/dependencies', (req, res) => {
+  const s = srv(req)
+  const meta = installedModMeta(s)
+  const enabled = getIniList(s, 'Mods')
+  const ignores = readDepIgnores(s)
+  const installed = Object.keys(meta)
+  const issues = sortIssues(analyzeDependencies({ enabled, installed, meta, ignores }))
+
+  // Resolve ids to something the UI can act on and a human can read.
+  const byLowerId = {}
+  for (const [id, m] of Object.entries(meta)) byLowerId[id.toLowerCase()] = Object.assign({ id }, m)
+
+  res.json({
+    issues: issues.map(i => {
+      const self = byLowerId[String(i.modId).toLowerCase()] || {}
+      const dep = byLowerId[String(i.dependency).toLowerCase()] || null
+      return Object.assign({}, i, {
+        key: depKey(i.modId, i.dependency),
+        modName: self.name || i.modId,
+        modWorkshopId: self.workshopId || null,
+        dependencyName: dep ? dep.name : null,
+        dependencyModId: dep ? dep.id : null,        // real-cased id, for enabling
+        dependencyWorkshopId: dep ? dep.workshopId : null
+      })
+    }),
+    checked: enabled.length,
+    installedCount: installed.length,
+    ignored: ignores
+  })
+})
+
+// Dismiss (or restore) one dependent>dependency pair. Scoped to the pair, not the mod, so
+// ignoring one optional companion doesn't silence a genuine problem in the same mod.
+app.post('/api/dependencies/ignore', (req, res) => {
+  const s = srv(req)
+  const { modId, dependency, ignored } = req.body || {}
+  if (!modId || !dependency) return res.status(400).json({ error: 'modId and dependency are required' })
+  if (typeof ignored !== 'boolean') return res.status(400).json({ error: 'ignored must be a boolean' })
+  const key = depKey(modId, dependency)
+  const list = readDepIgnores(s).filter(k => k.toLowerCase() !== key.toLowerCase())
+  if (ignored) list.push(key)
+  writeDepIgnores(s, list)
+  res.json({ success: true, key, ignored })
 })
 
 // --- Collections ---

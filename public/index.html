@@ -682,6 +682,7 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         </div>
       </div>
       <div id="mods-problems"></div>
+      <div id="mods-deps"></div>
       <div id="mods-table"></div>
     </div>
 
@@ -1147,7 +1148,7 @@ function switchTab(tab) {
   document.getElementById('tab-' + tab).classList.add('active')
   if (tab === 'logs') { startLog(); startManagerLog() }
   else { stopLog(); stopManagerLog() }
-  if (tab === 'mods') { fetchMods(); fetchCollections(); startDownloadPoll() }
+  if (tab === 'mods') { fetchMods(); fetchCollections(); fetchDependencies(); startDownloadPoll() }
   if (tab === 'players') fetchPlayers()
   if (tab === 'settings') fetchNotifSettings()
   if (tab === 'config') { fetchConfig(); fetchSandbox() }
@@ -1600,12 +1601,146 @@ function setModEnabled(cb, modId) {
         label.title = want ? 'Loaded by the server' : 'Installed but not loaded'
       }
       showMsg('mods-msg', (want ? 'Enabled ' : 'Disabled ') + modId + '. Restart the server to apply.', 'success', 6000)
+      fetchDependencies() // enabling/disabling a mod can create or resolve a dependency issue
     })
     .catch(function(e) {
       cb.checked = !want // the ini never changed, so put the box back
       showMsg('mods-msg', 'Could not update ' + modId + ': ' + e.message, 'error', 0)
     })
     .finally(function() { cb.disabled = false })
+}
+
+// --- Mod dependencies ---
+// PZ silently misbehaves when a require= isn't met, so this surfaces it. Nothing is auto-fixed:
+// authors list optional companion mods in require= constantly, so every row asks rather than acts.
+var cachedDeps = { issues: [], ignored: [] }
+
+function fetchDependencies() {
+  fetch('/api/dependencies').then(function(r) { return r.json() }).then(function(d) {
+    cachedDeps = d
+    renderDependencies()
+  }).catch(function() {})
+}
+
+var DEP_KIND = {
+  incompatible: { colour: '#e74c3c', label: 'Conflict',
+    text: function(i) { return '<strong>' + esc(i.modName) + '</strong> declares it is incompatible with <strong>' + esc(i.dependencyName || i.dependency) + '</strong>, and both are loaded.' } },
+  missing: { colour: '#e74c3c', label: 'Missing',
+    text: function(i) { return '<strong>' + esc(i.modName) + '</strong> requires <strong>' + esc(i.dependency) + '</strong>, which is not installed.' } },
+  disabled: { colour: '#f5a623', label: 'Not loaded',
+    text: function(i) { return '<strong>' + esc(i.modName) + '</strong> requires <strong>' + esc(i.dependencyName || i.dependency) + '</strong>, which is installed but not enabled.' } },
+  order: { colour: '#60a5fa', label: 'Load order',
+    text: function(i) { return '<strong>' + esc(i.modName) + '</strong> must load after <strong>' + esc(i.dependencyName || i.dependency) + '</strong>, but currently loads before it (position ' + (i.modIndex + 1) + ' vs ' + (i.dependencyIndex + 1) + ').' } }
+}
+
+function renderDependencies() {
+  var el = document.getElementById('mods-deps')
+  if (!el) return
+  var issues = cachedDeps.issues || []
+  var ignored = (cachedDeps.ignored || []).length
+
+  if (!issues.length) {
+    el.innerHTML = ignored
+      ? '<div class="msg msg-info" style="margin-bottom:1rem;font-size:.82rem">' +
+        'All mod dependencies satisfied. <span style="opacity:.8">' + ignored + ' ignored ' +
+        '<a href="#" onclick="showIgnoredDeps();return false" style="color:#60a5fa">(review)</a>.</span></div>'
+      : ''
+    return
+  }
+
+  var rows = issues.map(function(i) {
+    var kind = DEP_KIND[i.type] || { colour: 'var(--muted)', label: i.type, text: function() { return esc(i.modId) } }
+    var actions = []
+    if (i.type === 'disabled' && i.dependencyModId) {
+      actions.push('<button class="btn-primary btn-sm" onclick="depEnable(decodeURIComponent(\'' + encodeURIComponent(i.dependencyModId) + '\'))">Enable ' + esc(i.dependencyModId) + '</button>')
+    }
+    if (i.type === 'incompatible') {
+      // Either side can go; the user knows which they actually want.
+      actions.push('<button class="btn-danger btn-sm" onclick="depDisable(decodeURIComponent(\'' + encodeURIComponent(i.modId) + '\'))">Disable ' + esc(i.modId) + '</button>')
+      if (i.dependencyModId) actions.push('<button class="btn-danger btn-sm" onclick="depDisable(decodeURIComponent(\'' + encodeURIComponent(i.dependencyModId) + '\'))">Disable ' + esc(i.dependencyModId) + '</button>')
+    }
+    if (i.type === 'missing') {
+      actions.push('<a class="btn-secondary btn-sm" target="_blank" style="text-decoration:none" ' +
+        'href="https://steamcommunity.com/workshop/browse/?appid=108600&searchtext=' + encodeURIComponent(i.dependency) + '">Find on Workshop</a>')
+    }
+    actions.push('<button class="btn-secondary btn-sm" onclick="depIgnore(decodeURIComponent(\'' + encodeURIComponent(i.modId) + '\'), decodeURIComponent(\'' + encodeURIComponent(i.dependency) + '\'), true)" ' +
+      'title="Hide this one pairing. Use when the mod lists an optional companion in require=.">Not required</button>')
+
+    return '<div style="display:flex;gap:.75rem;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;' +
+      'padding:.55rem .7rem;border-left:3px solid ' + kind.colour + ';background:var(--bg);margin-bottom:.4rem;border-radius:3px">' +
+      '<div style="min-width:260px;flex:1">' +
+        '<span style="font-size:.68rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:' + kind.colour + '">' + kind.label + '</span>' +
+        '<div style="font-size:.82rem;margin-top:.15rem">' + kind.text(i) + '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:.4rem;flex-wrap:wrap">' + actions.join('') + '</div>' +
+      '</div>'
+  }).join('')
+
+  var blocking = issues.filter(function(i) { return i.type === 'incompatible' || i.type === 'missing' }).length
+  el.innerHTML = '<div class="card" style="margin-bottom:1rem;border-left:3px solid ' + (blocking ? '#e74c3c' : '#f5a623') + '">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">' +
+      '<div class="card-title" style="margin-bottom:0">Dependency issues <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + issues.length + ')</span></div>' +
+      '<span style="font-size:.75rem;color:var(--muted)">Checked ' + cachedDeps.checked + ' loaded mods' +
+        (ignored ? ' · ' + ignored + ' ignored <a href="#" onclick="showIgnoredDeps();return false" style="color:#60a5fa">(review)</a>' : '') + '</span>' +
+    '</div>' +
+    '<div style="font-size:.76rem;color:var(--muted);margin-bottom:.7rem">' +
+      'Read from each mod\'s <span class="mono">mod.info</span>. Authors often list optional companion mods as required — ' +
+      'use <strong>Not required</strong> to dismiss those. Nothing is changed automatically.</div>' +
+    rows + '</div>'
+}
+
+function depEnable(modId) {
+  fetch('/api/mods/enabled', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ modId: modId, enabled: true }) })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.success) throw new Error(d.error || 'unknown error')
+      showMsg('mods-msg', 'Enabled ' + modId + '. Restart the server to apply.', 'success', 6000)
+      fetchMods(); fetchDependencies()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not enable ' + modId + ': ' + e.message, 'error', 0) })
+}
+
+function depDisable(modId) {
+  if (!confirm('Disable ' + modId + '?\n\nIt stays installed; it just stops loading. Restart the server to apply.')) return
+  fetch('/api/mods/enabled', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ modId: modId, enabled: false }) })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.success) throw new Error(d.error || 'unknown error')
+      showMsg('mods-msg', 'Disabled ' + modId + '. Restart the server to apply.', 'success', 6000)
+      fetchMods(); fetchDependencies()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not disable ' + modId + ': ' + e.message, 'error', 0) })
+}
+
+function depIgnore(modId, dependency, ignored) {
+  fetch('/api/dependencies/ignore', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ modId: modId, dependency: dependency, ignored: ignored }) })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.success) throw new Error(d.error || 'unknown error')
+      showMsg('mods-msg', ignored ? 'Ignoring ' + modId + ' → ' + dependency + '.' : 'Restored ' + modId + ' → ' + dependency + '.', 'success', 4000)
+      fetchDependencies()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not update: ' + e.message, 'error', 0) })
+}
+
+// Ignored pairings are reversible, so they need somewhere to be reviewed.
+function showIgnoredDeps() {
+  var list = cachedDeps.ignored || []
+  if (!list.length) return
+  var el = document.getElementById('mods-deps')
+  el.insertAdjacentHTML('afterbegin',
+    '<div class="card" style="margin-bottom:1rem">' +
+    '<div class="card-title">Ignored dependencies <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + list.length + ')</span></div>' +
+    list.map(function(k) {
+      var parts = k.split('>')
+      return '<div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.4rem 0;font-size:.82rem">' +
+        '<span class="mono">' + esc(parts[0]) + ' → ' + esc(parts[1]) + '</span>' +
+        '<button class="btn-secondary btn-sm" onclick="depIgnore(decodeURIComponent(\'' + encodeURIComponent(parts[0]) + '\'), decodeURIComponent(\'' + encodeURIComponent(parts[1]) + '\'), false)">Restore</button>' +
+        '</div>'
+    }).join('') + '</div>')
 }
 
 // Clicking a tag chip narrows the table to that type.
@@ -1848,7 +1983,7 @@ function removeMod(workshopId) {
     .then(function(r) { return r.json() })
     .then(function(d) {
       showMsg('mods-msg', d.success ? 'Removed ' + workshopId + '. Restart to apply.' : 'Error: ' + d.error, d.success ? 'success' : 'error')
-      fetchMods()
+      fetchMods(); fetchDependencies()
     })
 }
 
