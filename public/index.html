@@ -1054,6 +1054,7 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       <div style="display:grid;gap:.7rem;margin-bottom:1.25rem">
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-playerJoin"> Player joined</label>
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-playerLeave"> Player left</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-playerSpawned"> Player spawned / respawned into the world</label>
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-playerDied"> Player died</label>
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-playerKicked"> Player kicked</label>
       </div>
@@ -2838,6 +2839,8 @@ function fetchNotifSettings() {
     document.getElementById('notif-diskthreshold').value = d.lowDiskThresholdGB || 5
     document.getElementById('evt-playerJoin').checked = !!(d.events && d.events.playerJoin)
     document.getElementById('evt-playerLeave').checked = !!(d.events && d.events.playerLeave)
+    // Off unless explicitly enabled — it fires on every respawn, not just first spawn.
+    document.getElementById('evt-playerSpawned').checked = !!(d.events && d.events.playerSpawned)
     document.getElementById('evt-playerDied').checked = !!(d.events && d.events.playerDied)
     document.getElementById('evt-playerKicked').checked = !!(d.events && d.events.playerKicked)
     var status = document.getElementById('notif-status')
@@ -2881,6 +2884,7 @@ function saveNotifSettings(cb) {
       lowDisk: document.getElementById('evt-lowDisk').checked,
       playerJoin: document.getElementById('evt-playerJoin').checked,
       playerLeave: document.getElementById('evt-playerLeave').checked,
+      playerSpawned: document.getElementById('evt-playerSpawned').checked,
       playerDied: document.getElementById('evt-playerDied').checked,
       playerKicked: document.getElementById('evt-playerKicked').checked
     },
