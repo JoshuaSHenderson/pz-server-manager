@@ -919,6 +919,27 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       <div id="servers-admin"></div>
     </div>
     <div class="card">
+      <details id="autoupdate-details" open>
+      <summary style="cursor:pointer"><span class="card-title" style="margin-bottom:0">Mod Auto-Update</span></summary>
+      <p style="font-size:.78rem;color:var(--muted);margin:.9rem 0">
+        Checks Steam every hour for updates to installed Workshop items. Updated mods are downloaded, and
+        once the downloads finish the server is restarted to apply them — but only while nobody is connected.
+        If players are online it keeps waiting and retries every few minutes.
+      </p>
+      <div style="display:grid;gap:.7rem;margin-bottom:1rem">
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="autoupdate-enabled" onchange="saveAutoUpdate()"> Check hourly for mod updates
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="autoupdate-restart" onchange="saveAutoUpdate()"> Restart automatically once downloads finish and the server is empty
+        </label>
+      </div>
+      <div id="autoupdate-status" style="font-size:.78rem;color:var(--muted);margin-bottom:.8rem"></div>
+      <button class="btn-secondary btn-sm" onclick="runAutoUpdateNow()">Check now</button>
+      </details>
+    </div>
+
+    <div class="card">
       <div class="card-title">Pushover Notifications</div>
       <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem">
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.9rem">
@@ -1169,7 +1190,7 @@ function switchTab(tab) {
   else { stopLog(); stopManagerLog() }
   if (tab === 'mods') { fetchMods(); fetchCollections(); fetchDependencies(); fetchAudit(); renderModOrder(); startDownloadPoll() }
   if (tab === 'players') fetchPlayers()
-  if (tab === 'settings') fetchNotifSettings()
+  if (tab === 'settings') { fetchNotifSettings(); fetchAutoUpdate() }
   if (tab === 'config') { fetchConfig(); fetchSandbox() }
   if (tab === 'backups') fetchBackups()
   if (tab === 'dashboard') fetchSchedule()
@@ -1904,6 +1925,54 @@ function deleteOrphan(kind, id) {
       fetchAudit()
     })
     .catch(function(e) { showMsg('mods-msg', 'Could not delete ' + id + ': ' + e.message, 'error', 0) })
+}
+
+// --- Mod auto-update ---
+function fetchAutoUpdate() {
+  fetch('/api/mods/autoupdate').then(function(r) { return r.json() }).then(function(d) {
+    document.getElementById('autoupdate-enabled').checked = !!d.enabled
+    document.getElementById('autoupdate-restart').checked = !!d.restartWhenEmpty
+    var bits = []
+    if (d.lastCheck) bits.push('Last check: ' + new Date(d.lastCheck).toLocaleString())
+    if (d.tracked) bits.push(d.tracked + ' mod(s) tracked')
+    if ((d.pending || []).length) bits.push('<strong style="color:#f5a623">' + d.pending.length + ' update(s) pending a restart</strong>')
+    if (d.lastRestart) bits.push('Last auto-restart: ' + new Date(d.lastRestart).toLocaleString())
+    var el = document.getElementById('autoupdate-status')
+    el.innerHTML = (d.lastResult ? '<div style="margin-bottom:.3rem">' + esc(d.lastResult) + '</div>' : '') +
+      (bits.length ? bits.join(' · ') : (d.enabled ? 'Enabled — first check runs within a few minutes.' : 'Disabled.'))
+  }).catch(function() {})
+}
+
+function saveAutoUpdate() {
+  var enabled = document.getElementById('autoupdate-enabled').checked
+  var restartWhenEmpty = document.getElementById('autoupdate-restart').checked
+  // Enabling never triggers an immediate mass update: the first check only records a baseline.
+  if (enabled && restartWhenEmpty && !confirm('Enable automatic restarts?\n\nWhen a mod update is found the server will be restarted to apply it — only once downloads finish and no players are connected. Anyone who joins in the meantime delays it.')) {
+    document.getElementById('autoupdate-restart').checked = false
+    restartWhenEmpty = false
+  }
+  fetch('/api/mods/autoupdate', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: enabled, restartWhenEmpty: restartWhenEmpty }) })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.success) throw new Error(d.error || 'save failed')
+      showMsg('settings-msg', enabled
+        ? 'Mod auto-update on — checking hourly.' + (restartWhenEmpty ? ' Will restart when empty.' : ' Restarts are off; updates download only.')
+        : 'Mod auto-update off.', 'success', 5000)
+      fetchAutoUpdate()
+    })
+    .catch(function(e) { showMsg('settings-msg', 'Could not save: ' + e.message, 'error', 0) })
+}
+
+function runAutoUpdateNow() {
+  fetch('/api/mods/autoupdate/check', { method: 'POST' })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok) throw new Error(x.d.error || 'check failed')
+      showMsg('settings-msg', x.d.message, 'info', 6000)
+      setTimeout(fetchAutoUpdate, 6000)
+    })
+    .catch(function(e) { showMsg('settings-msg', 'Check failed: ' + e.message, 'error', 0) })
 }
 
 // --- Server alerts (dashboard) ---

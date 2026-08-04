@@ -9,6 +9,7 @@ const net = require('net')
 const { prunableItems } = require('./prune')
 const { parseDepList, analyzeDependencies, sortIssues } = require('./deps')
 const { validateReorder } = require('./order')
+const { outdatedItems, seedState, dueForCheck, shouldRestart } = require('./autoupdate')
 
 const app = express()
 app.use(express.json())
@@ -1153,6 +1154,8 @@ function steamFileDetails(ids, cb) {
           if (f.publishedfileid) map[f.publishedfileid] = {
             title: f.title || '',
             fileSize: parseInt(f.file_size) || 0,
+            // Steam's own last-updated stamp — the signal the auto-updater compares against.
+            timeUpdated: parseInt(f.time_updated) || 0,
             // Workshop tags: "Vehicles", "Build 42", "Audio", "Multiplayer", ...
             tags: (f.tags || []).map(t => t.tag).filter(Boolean),
             ok: f.result === 1
@@ -1912,6 +1915,167 @@ app.post('/api/dependencies/ignore', (req, res) => {
   if (ignored) list.push(key)
   writeDepIgnores(s, list)
   res.json({ success: true, key, ignored })
+})
+
+// --- Mod auto-update ---
+//
+// Hourly: ask Steam whether any installed Workshop item has been updated, download the ones that
+// have, and — once the downloads finish and the server is empty — restart so they take effect.
+//
+// Off by default. It restarts a live game server, so every decision is conservative: a first
+// sighting only seeds the baseline (enabling it must not re-download 150 mods), and a restart
+// needs a genuinely pending update, no downloads in flight, and a confirmed-empty server.
+const AUTOUPDATE_CHECK_MS = 60 * 60 * 1000   // ask Steam at most hourly
+const AUTOUPDATE_TICK_MS = 5 * 60 * 1000     // but re-evaluate the restart condition often
+
+function autoUpdatePath(s) { return s.data + '/mod-autoupdate.json' }
+function readAutoUpdate(s) {
+  const def = { enabled: false, restartWhenEmpty: true, lastCheck: null, lastRestart: null, pending: [], times: {}, lastResult: '' }
+  try { return Object.assign(def, JSON.parse(fs.readFileSync(autoUpdatePath(s), 'utf8'))) }
+  catch { return def }
+}
+function writeAutoUpdate(s, cfg) {
+  try { fs.writeFileSync(autoUpdatePath(s), JSON.stringify(cfg, null, 2)) } catch (e) {}
+}
+
+// Steam stamps for every registered item, batched like getTitles does.
+function fetchWorkshopTimes(ids, cb) {
+  const out = {}
+  if (!ids.length) return cb(out)
+  const chunks = []
+  for (let i = 0; i < ids.length; i += 50) chunks.push(ids.slice(i, i + 50))
+  let pending = chunks.length
+  for (const chunk of chunks) {
+    steamFileDetails(chunk, (err, map) => {
+      if (!err) for (const [id, d] of Object.entries(map)) if (d.ok && d.timeUpdated) out[id] = d.timeUpdated
+      if (--pending <= 0) cb(out)
+    })
+  }
+}
+
+// How many downloads are still in flight for this server.
+function activeDownloadCount(s, cb) {
+  exec('docker logs ' + s.container + ' --tail 1500 2>&1', { maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+    const live = parseDownloads((out || '').split('\n')).length
+    const queued = readQueue(s).filter(e => e.status === 'queued').length
+    cb(live + queued)
+  })
+}
+
+function runAutoUpdate(s) {
+  const cfg = readAutoUpdate(s)
+  if (!cfg.enabled) return
+
+  const finish = () => writeAutoUpdate(s, cfg)
+
+  // Step 1 — restart if a previous pass left updates waiting and the server is now clear.
+  activeDownloadCount(s, active => {
+    // A missing user log means we cannot prove the server is empty, so report unknown rather
+    // than zero: shouldRestart() treats unknown as "someone might be on".
+    const players = findLatestUserLog(s) ? onlinePlayersFor(s).length : null
+    const verdict = shouldRestart({
+      enabled: cfg.enabled, restartWhenEmpty: cfg.restartWhenEmpty,
+      pending: cfg.pending, activeDownloads: active, playersOnline: players
+    })
+
+    if (verdict.restart) {
+      console.log('[autoupdate] ' + serverLabel(s) + ': restarting for ' + cfg.pending.length + ' updated mod(s)')
+      mstate(s).intentionalStop = true
+      exec('docker restart ' + s.container, { timeout: 120000 }, err => {
+        const cur = readAutoUpdate(s)
+        if (err) {
+          cur.lastResult = 'Restart failed: ' + err.message
+          console.error('[autoupdate] restart failed:', err.message)
+        } else {
+          cur.lastResult = 'Restarted for ' + cur.pending.length + ' updated mod(s) at ' + new Date().toISOString()
+          cur.lastRestart = new Date().toISOString()
+          // Only record the new stamps once the update has actually been applied — a failed
+          // download or restart is then retried rather than silently forgotten.
+          cur.times = seedState(cur.times, cur.pendingTimes || {})
+          cur.pending = []
+          cur.pendingTimes = {}
+          pushoverFor(s, 'PZ Mods Auto-Updated', 'Server was empty — restarted to apply updated mods.')
+        }
+        writeAutoUpdate(s, cur)
+      })
+      return
+    }
+    if (cfg.pending.length) cfg.lastResult = 'Waiting to restart: ' + verdict.reason
+
+    // Step 2 — ask Steam, at most hourly.
+    if (!dueForCheck(Date.now(), cfg.lastCheck, AUTOUPDATE_CHECK_MS)) return finish()
+
+    const ids = getIniList(s, 'WorkshopItems')
+    fetchWorkshopTimes(ids, times => {
+      const cur = readAutoUpdate(s)
+      cur.lastCheck = new Date().toISOString()
+      const seeded = Object.keys(cur.times).length
+      const outdated = outdatedItems(cur.times, times)
+
+      if (!seeded) {
+        // First run: record what everything is at right now and do nothing else.
+        cur.times = seedState(cur.times, times)
+        cur.lastResult = 'Baseline recorded for ' + Object.keys(cur.times).length + ' mod(s) — updates will be detected from here on.'
+        console.log('[autoupdate] ' + serverLabel(s) + ': baseline recorded (' + Object.keys(cur.times).length + ' mods)')
+        return writeAutoUpdate(s, cur)
+      }
+
+      if (!outdated.length) {
+        // Nothing changed, but keep stamps current for ids seen for the first time.
+        cur.times = seedState(cur.times, times)
+        cur.lastResult = 'Checked ' + Object.keys(times).length + ' mod(s) — all up to date.'
+        return writeAutoUpdate(s, cur)
+      }
+
+      console.log('[autoupdate] ' + serverLabel(s) + ': ' + outdated.length + ' mod(s) updated on Steam — downloading')
+      cur.pending = [...new Set([...(cur.pending || []), ...outdated])]
+      cur.pendingTimes = Object.assign({}, cur.pendingTimes || {}, times)
+      cur.lastResult = outdated.length + ' update(s) downloading, queued ' + new Date().toISOString()
+      writeAutoUpdate(s, cur)
+      steamcmdDownload(s, outdated, 'autoupdate', null)
+      pushoverFor(s, 'PZ Mod Updates Found', outdated.length + ' mod(s) updated on Steam — downloading, will restart when the server is empty.')
+    })
+  })
+}
+
+setInterval(() => { for (const s of allServers()) { try { runAutoUpdate(s) } catch (e) { console.error('[autoupdate]', e.message) } } }, AUTOUPDATE_TICK_MS)
+
+app.get('/api/mods/autoupdate', (req, res) => {
+  const s = srv(req)
+  const cfg = readAutoUpdate(s)
+  res.json({
+    enabled: cfg.enabled,
+    restartWhenEmpty: cfg.restartWhenEmpty,
+    lastCheck: cfg.lastCheck,
+    lastRestart: cfg.lastRestart,
+    lastResult: cfg.lastResult,
+    pending: cfg.pending || [],
+    tracked: Object.keys(cfg.times || {}).length,
+    checkIntervalHours: AUTOUPDATE_CHECK_MS / 3600000
+  })
+})
+
+app.put('/api/mods/autoupdate', (req, res) => {
+  const s = srv(req)
+  const { enabled, restartWhenEmpty } = req.body || {}
+  if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' })
+  const cfg = readAutoUpdate(s)
+  cfg.enabled = enabled
+  if (typeof restartWhenEmpty === 'boolean') cfg.restartWhenEmpty = restartWhenEmpty
+  if (!enabled) cfg.lastResult = 'Disabled.'
+  writeAutoUpdate(s, cfg)
+  res.json({ success: true, enabled: cfg.enabled, restartWhenEmpty: cfg.restartWhenEmpty })
+})
+
+// Runs the whole pass immediately, for testing the setup without waiting for the hourly tick.
+app.post('/api/mods/autoupdate/check', (req, res) => {
+  const s = srv(req)
+  const cfg = readAutoUpdate(s)
+  if (!cfg.enabled) return res.status(400).json({ error: 'Auto-update is disabled' })
+  cfg.lastCheck = null // force the Steam call regardless of when the last one ran
+  writeAutoUpdate(s, cfg)
+  runAutoUpdate(s)
+  res.json({ success: true, message: 'Check started — results appear here within a few seconds.' })
 })
 
 // --- Server alerts ---
