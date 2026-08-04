@@ -382,6 +382,22 @@ function pushover(title, message) {
 // PublicName, and only falls back to s.name / the container name.
 function pushoverFor(s, title, message) { pushover('[' + serverLabel(s) + '] ' + title, message) }
 
+// Workshop URLs for the collections this server tracks. Used in the Discord status so players can
+// subscribe to the whole mod list in one click instead of being handed a list of ids.
+function collectionUrls(s) {
+  try {
+    return readCollections(s).map(c => 'https://steamcommunity.com/sharedfiles/filedetails/?id=' + c.id)
+  } catch { return [] }
+}
+// Markdown form for the rich embed, titled where a title is known.
+function collectionLinks(s) {
+  try {
+    return readCollections(s)
+      .map(c => '[' + (c.title || 'Server Collection') + '](https://steamcommunity.com/sharedfiles/filedetails/?id=' + c.id + ')')
+      .join(' · ')
+  } catch { return '' }
+}
+
 // --- Discord Status helpers ---
 function discordRequest(method, urlPath, body, cb) {
   const data = body ? JSON.stringify(body) : null
@@ -487,6 +503,10 @@ function updateDiscordStatus(cb) {
             if (version) value += ' · v' + version
             if (externalIp && port) value += '\n🔌 `' + externalIp + ':' + port + '`'
             value += '\n👥 ' + players.length + ' online' + (players.length ? ': ' + players.slice(0, 15).join(', ') + (players.length > 15 ? ', …' : '') : '')
+            // Tracked collections, so people can subscribe to the server's mod list from Discord
+            // rather than being sent a list of Workshop ids.
+            const collLinks = collectionLinks(s)
+            if (collLinks) value += '\n🧩 ' + collLinks
             fields.push({ name: title, value, inline: false })
           }
           body = { embeds: [{ title: 'Project Zomboid Servers', color: anyOnline ? 5763719 : 15548997, fields, timestamp: new Date().toISOString() }] }
@@ -495,7 +515,9 @@ function updateDiscordStatus(cb) {
             const isOnline = (states[s.container] || {}).status === 'running'
             const n = isOnline ? onlinePlayersFor(s).length : 0
             const version = versions[s.id]
-            return serverLabel(s) + (version ? ' v' + version : '') + ' ' + (isOnline ? '🟢 ' + n + ' online' : '🔴')
+            const coll = collectionUrls(s)[0]
+            return serverLabel(s) + (version ? ' v' + version : '') + ' ' + (isOnline ? '🟢 ' + n + ' online' : '🔴') +
+              (coll ? ' · mods: ' + coll : '')
           }).join(' | ')
           const template = cfg.discord.template || 'Project Zomboid Server: <ZomboidServerStats>'
           const content = template
@@ -553,6 +575,18 @@ function mstate(s) {
   return monitorState[s.id]
 }
 
+// "Started" only means the container is up. PZ then loads assets, mods and the world for a long
+// while — on this server, minutes — and rejects connections until it prints this. That is the
+// moment worth telling people about, not the container transition.
+const SERVER_READY_MARKER = '*** SERVER STARTED ***'
+const READY_WAIT_MS = 45 * 60 * 1000
+
+function markAwaitingReady(s) {
+  const st = mstate(s)
+  st.awaitingReady = true
+  st.awaitingSince = Date.now()
+}
+
 // Crash monitor
 setInterval(() => {
   for (const s of allServers()) {
@@ -565,11 +599,46 @@ setInterval(() => {
           pushoverFor(s, 'PZ Server Crashed', 'Server stopped unexpectedly. Container status: ' + status)
         }
       }
+      // Any transition into running — ours or a crash-restart — starts the wait for readiness.
+      // Skipped on the manager's first observation so restarting the manager alone can't fire it.
+      if (st.lastKnownStatus && st.lastKnownStatus !== 'running' && status === 'running') markAwaitingReady(s)
       st.intentionalStop = false
       st.lastKnownStatus = status
     })
   }
 }, 60000)
+
+// Watches for the readiness marker after a start/restart. Only looks at logs written since the
+// container came up, so the previous run's marker can never be mistaken for this one's.
+setInterval(() => {
+  for (const s of allServers()) {
+    const st = mstate(s)
+    if (!st.awaitingReady) continue
+    if (Date.now() - (st.awaitingSince || 0) > READY_WAIT_MS) {
+      st.awaitingReady = false
+      console.log('[ready] ' + serverLabel(s) + ': gave up waiting for the ready marker')
+      continue
+    }
+    exec('docker inspect ' + s.container + ' --format "{{.State.StartedAt}}"', (e1, startedAt) => {
+      const since = (startedAt || '').trim()
+      if (!since) return
+      exec('docker logs ' + s.container + ' --since ' + since + ' 2>&1 | grep -F ' + JSON.stringify(SERVER_READY_MARKER) + ' | tail -1',
+        { maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
+          if (!(out || '').trim()) return
+          if (!st.awaitingReady) return   // another tick won the race
+          st.awaitingReady = false
+          const secs = Math.round((Date.now() - new Date(since).getTime()) / 1000)
+          const mins = Math.floor(secs / 60)
+          const took = mins ? mins + 'm ' + (secs % 60) + 's' : secs + 's'
+          console.log('[ready] ' + serverLabel(s) + ': accepting players after ' + took)
+          const cfg = readNotifConfig()
+          if (cfg.enabled && cfg.events && cfg.events.serverReady !== false) {
+            pushoverFor(s, 'PZ Server Ready', 'Finished loading after ' + took + ' — accepting players now.')
+          }
+        })
+    })
+  }
+}, 20000)
 
 // Low disk monitor (shared filesystem — one check, one alert)
 let lowDiskAlerted = false
@@ -660,14 +729,29 @@ function pollUserLog(s) {
     fs.closeSync(fd)
     st.userLogPos = size
 
+    // Connection state is tracked rather than notifying per matching line. PZ writes
+    // "fully connected" every time a character enters the world, which includes respawning after
+    // death — that produced a "joined the server" alert for someone who never left. In one real
+    // log: 14 "allowed to join" against 18 "fully connected", the extra four being respawns.
+    // "allowed to join" is the actual connection event, and the online set makes a repeat a no-op.
+    if (!st.online) st.online = new Set()
     for (const line of buf.toString('utf8').split('\n')) {
       if (!line.trim()) continue
       let m
-      if (ev.playerJoin && (m = line.match(/"([^"]+)" fully connected/))) {
-        pushoverFor(s, 'Player Joined', m[1] + ' joined the server'); continue
+      if ((m = line.match(/"([^"]+)" allowed to join/))) {
+        const who = m[1]
+        if (!st.online.has(who)) {
+          st.online.add(who)
+          if (ev.playerJoin) pushoverFor(s, 'Player Joined', who + ' joined the server')
+        }
+        continue
       }
-      if (ev.playerLeave && (m = line.match(/"([^"]+)" disconnected player/))) {
-        pushoverFor(s, 'Player Left', m[1] + ' left the server'); continue
+      if ((m = line.match(/"([^"]+)" (?:disconnected player|removed connection)/))) {
+        const who = m[1]
+        if (st.online.delete(who) && ev.playerLeave) {
+          pushoverFor(s, 'Player Left', who + ' left the server')
+        }
+        continue
       }
       if (ev.playerDied && (m = line.match(/user (\S+) died at/))) {
         pushoverFor(s, 'Player Died', m[1] + ' has died'); continue
@@ -964,6 +1048,7 @@ app.get('/api/status', (req, res) => {
 
 app.post('/api/server/start', (req, res) => {
   const s = srv(req)
+  markAwaitingReady(s)
   exec('docker start ' + s.container, { timeout: 30000 }, (err) => {
     const ok = !err
     if (ok) {
@@ -990,6 +1075,7 @@ app.post('/api/server/stop', (req, res) => {
 app.post('/api/server/restart', (req, res) => {
   const s = srv(req)
   mstate(s).intentionalStop = true
+  markAwaitingReady(s)
   exec('docker restart ' + s.container, { timeout: 60000 }, (err) => {
     const ok = !err
     if (ok) {
@@ -1981,6 +2067,7 @@ function runAutoUpdate(s) {
     if (verdict.restart) {
       console.log('[autoupdate] ' + serverLabel(s) + ': restarting for ' + cfg.pending.length + ' updated mod(s)')
       mstate(s).intentionalStop = true
+      markAwaitingReady(s)
       exec('docker restart ' + s.container, { timeout: 120000 }, err => {
         const cur = readAutoUpdate(s)
         if (err) {

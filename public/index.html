@@ -221,6 +221,26 @@ main {
 }
 .card-title::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(244,63,94,.3), transparent) }
 
+/* Collapsible cards. The native disclosure marker is suppressed and replaced with a caret drawn
+   as the first flex item of .card-title, so it sits inline immediately before the title text
+   rather than on its own line above it (which is where a flex <summary> puts the default one). */
+details > summary { list-style: none; cursor: pointer; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::marker { content: ''; }
+details > summary .card-title::before {
+  content: '\25B8';
+  display: inline-block;
+  color: var(--accent);
+  font-size: .72rem;
+  line-height: 1;
+  transform-origin: 50% 50%;
+  transition: transform .15s ease;
+}
+details[open] > summary .card-title::before { transform: rotate(90deg); }
+details > summary:hover .card-title { color: #fff }
+/* A collapsed card should not keep the title's bottom gap. */
+details:not([open]) > summary .card-title { margin-bottom: 0 }
+
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4rem }
 @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr } }
 
@@ -546,7 +566,9 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
          notable errors from both log streams. Hidden entirely when there is nothing to say. -->
     <div id="dash-alerts"></div>
     <div class="card">
-      <div class="card-title">Server Control</div>
+      <details open>
+
+        <summary><span class="card-title">Server Control</span></summary>
       <div class="stat-grid">
         <div class="stat"><div class="stat-value" id="dash-status">—</div><div class="stat-label">Status</div></div>
         <div class="stat"><div class="stat-value" id="dash-uptime" style="font-size:1rem">—</div><div class="stat-label">Started</div></div>
@@ -561,10 +583,15 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <button class="btn-danger" id="btn-stop" onclick="serverAction('stop')">Stop</button>
         <button class="btn-warn" id="btn-restart" onclick="serverAction('restart')">Restart</button>
       </div>
-    </div>
+    
+
+      </details>
+</div>
 
     <div class="card">
-      <div class="card-title">Live Players</div>
+      <details open>
+
+        <summary><span class="card-title">Live Players</span></summary>
       <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap;margin-bottom:1rem">
         <div class="stat" style="flex:0 0 110px">
           <div class="stat-value" id="online-count" style="color:var(--accent2);text-shadow:0 0 18px rgba(94,234,212,.45)">—</div>
@@ -576,10 +603,15 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <button class="btn-secondary btn-sm" onclick="fetchOnlinePlayers()">Refresh</button>
         <span id="online-updated" style="font-size:.7rem;color:var(--muted);font-family:var(--font-mono)"></span>
       </div>
-    </div>
+    
+
+      </details>
+</div>
 
     <div class="card">
-      <div class="card-title">Restart Schedule</div>
+      <details open>
+
+        <summary><span class="card-title">Restart Schedule</span></summary>
       <div id="sched-msg"></div>
       <div style="display:flex;align-items:center;gap:1.25rem;margin-bottom:1rem;flex-wrap:wrap">
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.9rem">
@@ -615,10 +647,15 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <button class="btn-warn" onclick="warnedRestart()">Warn &amp; Restart in 10 min</button>
         <button class="btn-secondary" onclick="customWarnedRestart()">Custom delay...</button>
       </div>
-    </div>
+    
+
+      </details>
+</div>
 
     <div class="card">
-      <div class="card-title">Connection Info</div>
+      <details open>
+
+        <summary><span class="card-title">Connection Info</span></summary>
       <table>
         <tr><td class="text-muted" style="width:140px">LAN</td><td class="mono">192.168.1.20:16261</td></tr>
         <tr><td class="text-muted">Game Port</td><td class="mono">UDP 16261 / 16262</td></tr>
@@ -626,7 +663,10 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <tr><td class="text-muted">Server Name</td><td class="mono">servertest</td></tr>
         <tr><td class="text-muted">Image</td><td class="mono">danixu86/project-zomboid-dedicated-server:latest</td></tr>
       </table>
-    </div>
+    
+
+      </details>
+</div>
   </div>
 
   <!-- MODS -->
@@ -725,7 +765,9 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
     <div class="pane-head"><h1>Players</h1><p>Whitelist, access levels, and bans</p></div>
     <div id="players-msg"></div>
     <div class="card">
-      <div class="card-title">Add to Whitelist</div>
+      <details open>
+
+        <summary><span class="card-title">Add to Whitelist</span></summary>
       <div class="row">
         <input type="text" id="new-username" placeholder="Username">
         <select id="new-accesslevel">
@@ -738,13 +780,18 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         </select>
         <button class="btn-primary" onclick="addPlayer()">Add</button>
       </div>
-    </div>
+    
+
+      </details>
+</div>
     <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
-        <div class="card-title" style="margin-bottom:0">Players</div>
-        <span id="player-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap;margin-left:1rem"></span>
-      </div>
-      <div id="players-table"></div>
+      <details open>
+        <summary style="display:flex;align-items:center;justify-content:space-between;gap:1rem">
+          <span class="card-title" style="margin-bottom:0">Players</span>
+          <span id="player-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap;margin-left:1rem"></span>
+        </summary>
+        <div id="players-table" style="margin-top:1rem"></div>
+      </details>
     </div>
   </div>
 
@@ -752,7 +799,9 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
   <div id="tab-logs" class="tab-pane">
     <div class="pane-head"><h1>Logs</h1><p>Live server output stream</p></div>
     <div class="card" style="padding-bottom:1rem">
-      <div class="log-controls">
+      <details open>
+      <summary><span class="card-title" style="margin-bottom:0">PZ Server Log</span></summary>
+      <div class="log-controls" style="margin-top:.9rem">
         <button class="btn-secondary btn-sm" id="log-toggle" onclick="toggleLog()">Pause</button>
         <button class="btn-secondary btn-sm" onclick="clearLog()">Clear</button>
         <input type="text" id="log-filter" placeholder="Filter..." oninput="applyFilter()" style="width:200px">
@@ -761,12 +810,15 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       <div class="terminal">
         <div id="log-output"></div>
       </div>
+          </details>
     </div>
 
     <!-- The manager's own output: SteamCMD launches, download reconciliation, auto-sync, RCON,
          schedule and Express errors. When a mod fails to install, the reason is in here. -->
     <div class="card" style="padding-bottom:1rem">
-      <div class="card-title" style="margin-bottom:.75rem">PZ Server Manager Logs</div>
+      <details open>
+
+        <summary><span class="card-title" style="margin-bottom:.75rem">PZ Server Manager Logs</span></summary>
       <div class="log-controls">
         <button class="btn-secondary btn-sm" id="mlog-toggle" onclick="toggleManagerLog()">Pause</button>
         <button class="btn-secondary btn-sm" onclick="clearManagerLog()">Clear</button>
@@ -776,7 +828,10 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       <div class="terminal" style="max-height:260px">
         <div id="mlog-output"></div>
       </div>
-    </div>
+    
+
+      </details>
+</div>
   </div>
 
   <!-- CONFIG -->
@@ -784,7 +839,9 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
     <div class="pane-head"><h1>Config</h1><p>Server settings — restart required to apply</p></div>
     <div id="config-msg"></div>
     <div class="card">
-      <div class="card-title">Server Settings</div>
+      <details open>
+
+        <summary><span class="card-title">Server Settings</span></summary>
       <p style="font-size:.85rem;color:var(--muted);margin:0 0 1.25rem">Changes require a server restart to take effect.</p>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem">
         <div>
@@ -823,12 +880,16 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <summary style="cursor:pointer;font-size:.9rem;color:var(--muted)">Advanced Options (all remaining servertest.ini keys)</summary>
         <div id="cfg-advanced-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-top:1rem"></div>
       </details>
-    </div>
+    
+
+      </details>
+</div>
     <div class="card" style="margin-top:1.4rem">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.5rem">
-        <div class="card-title" style="margin-bottom:0">Sandbox &amp; Mod Options</div>
+      <details open>
+      <summary style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.5rem">
+        <span class="card-title" style="margin-bottom:0">Sandbox &amp; Mod Options</span>
         <span id="sandbox-dirty" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono)"></span>
-      </div>
+      </summary>
       <p style="font-size:.85rem;color:var(--muted);margin:0 0 1rem">Sandbox settings and most mods' own options. Values are validated against each option's type and allowed range before anything is written, and a timestamped backup is taken on every save.</p>
       <div style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin-bottom:1rem">
         <select id="sandbox-section" class="server-select" style="width:auto;margin:0;padding:.35rem .6rem;font-size:.85rem" onchange="renderSandbox()"></select>
@@ -853,6 +914,7 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
           <div id="sandbox-backups" style="font-size:.78rem;color:var(--muted)"></div>
         </div>
       </details>
+          </details>
     </div>
   </div>
 
@@ -862,14 +924,21 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
     <div id="backups-msg"></div>
     <div class="grid2">
       <div class="card">
-        <div class="card-title">Download Backup</div>
+        <details open>
+
+          <summary><span class="card-title">Download Backup</span></summary>
         <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem">
           Creates a .tar.gz with world saves, player DB, and server config. Stop the server first for cleanest backup.
         </p>
         <button class="btn-primary" id="btn-download-backup" onclick="downloadBackup()">Download Now</button>
-      </div>
+      
+
+        </details>
+</div>
       <div class="card">
-        <div class="card-title">Upload &amp; Restore</div>
+        <details open>
+
+          <summary><span class="card-title">Upload &amp; Restore</span></summary>
         <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem">
           Upload a .tar.gz or PZ native .zip backup. <strong style="color:var(--warn)">Stop the server before restoring.</strong>
         </p>
@@ -881,12 +950,16 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
           <div style="font-size:.78rem;color:var(--muted);margin-bottom:.25rem" id="upload-progress-text">Uploading...</div>
           <div class="progress-bar-wrap"><div class="progress-bar" id="upload-progress-bar" style="width:0%"></div></div>
         </div>
-      </div>
+      
+
+        </details>
+</div>
     </div>
     <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
-        <div class="card-title" style="margin-bottom:0">Server Backups</div>
-        <button class="btn-secondary btn-sm" onclick="fetchBackups()" style="margin-left:1rem;flex-shrink:0">Refresh</button>
+      <details open>
+      <summary><span class="card-title" style="margin-bottom:0">Server Backups</span></summary>
+      <div style="display:flex;justify-content:flex-end;margin:.8rem 0">
+        <button class="btn-secondary btn-sm" onclick="fetchBackups()">Refresh</button>
       </div>
       <div class="backup-section">
         <div class="backup-section-label">Startup backups (auto, on each server start)</div>
@@ -900,6 +973,7 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <div class="backup-section-label">Manual backups (previously uploaded restores)</div>
         <div id="backups-manual"><div class="empty">Loading...</div></div>
       </div>
+          </details>
     </div>
   </div>
 
@@ -908,8 +982,9 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
     <div class="pane-head"><h1>Settings</h1><p>Notifications and integrations</p></div>
     <div id="settings-msg"></div>
     <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:.4rem">
-        <div class="card-title" style="margin:0">Managed Servers</div>
+      <details open>
+      <summary><span class="card-title" style="margin:0">Managed Servers</span></summary>
+      <div style="display:flex;justify-content:flex-end;margin:.8rem 0 0">
         <button class="btn-secondary btn-sm" onclick="detectServers()">Re-scan</button>
       </div>
       <p style="font-size:.78rem;color:var(--muted);margin:0 0 .9rem">
@@ -917,6 +992,7 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         manage here, and forget leftovers from servers that no longer exist.
       </p>
       <div id="servers-admin"></div>
+          </details>
     </div>
     <div class="card">
       <details id="autoupdate-details" open>
@@ -940,7 +1016,9 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
     </div>
 
     <div class="card">
-      <div class="card-title">Pushover Notifications</div>
+      <details open>
+
+        <summary><span class="card-title">Pushover Notifications</span></summary>
       <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem">
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.9rem">
           <input type="checkbox" id="notif-enabled"> Enable notifications
@@ -960,6 +1038,7 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       <div class="card-title" style="margin-bottom:.85rem">Notify On</div>
       <div style="display:grid;gap:.7rem;margin-bottom:1.25rem">
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-serverStart"> Server started / restarted</label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-serverReady"> Server finished loading (accepting players)</label>
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-serverStop"> Server stopped (manual)</label>
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-serverCrash"> Server crashed</label>
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="evt-downloadComplete"> Workshop downloads complete</label>
@@ -979,9 +1058,14 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <button class="btn-primary" onclick="saveNotifSettings()">Save</button>
         <button class="btn-secondary" onclick="testNotif()">Send Test</button>
       </div>
-    </div>
+    
+
+      </details>
+</div>
     <div class="card" style="margin-top:1.4rem">
-      <div class="card-title">Discord Status Message</div>
+      <details open>
+
+        <summary><span class="card-title">Discord Status Message</span></summary>
       <p style="font-size:.85rem;color:var(--muted);margin:0 0 1rem">Posts live server status to a Discord channel via webhook.</p>
       <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem">
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.9rem">
@@ -1017,7 +1101,10 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       <div style="display:flex;gap:.6rem">
         <button class="btn-primary" onclick="saveAndUpdateDiscord()">Save &amp; Update Now</button>
       </div>
-    </div>
+    
+
+      </details>
+</div>
   </div>
 </main>
 </div>
@@ -1992,21 +2079,25 @@ function renderAlerts(d) {
   var alerts = (d && d.alerts) || []
   if (!alerts.length) {
     el.innerHTML = '<div class="card" style="margin-bottom:1.4rem;border-left:3px solid #2ecc71">' +
-      '<div class="card-title" style="margin-bottom:.3rem">Server Alerts</div>' +
-      '<div style="font-size:.82rem;color:var(--muted)">Nothing to report — no mod issues, orphaned files, failed downloads or notable errors.</div></div>'
+      '<details' + (panelOpen.alerts ? ' open' : '') + ' ontoggle="panelOpen.alerts = this.open">' +
+      '<summary><span class="card-title" style="margin-bottom:0">Server Alerts</span></summary>' +
+      '<div style="font-size:.82rem;color:var(--muted);margin-top:.7rem">Nothing to report — no mod issues, orphaned files, failed downloads or notable errors.</div>' +
+      '</details></div>'
     return
   }
   var c = d.counts || {}
   var worst = c.error ? '#e74c3c' : (c.warn ? '#f5a623' : '#60a5fa')
   el.innerHTML = '<div class="card" style="margin-bottom:1.4rem;border-left:3px solid ' + worst + '">' +
-    '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.7rem">' +
-      '<div class="card-title" style="margin-bottom:0">Server Alerts</div>' +
+    '<details' + (panelOpen.alerts ? ' open' : '') + ' ontoggle="panelOpen.alerts = this.open">' +
+    '<summary style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.7rem">' +
+      '<span class="card-title" style="margin-bottom:0">Server Alerts</span>' +
       '<span style="font-size:.75rem;color:var(--muted)">' +
         (c.error ? '<span style="color:#e74c3c">' + c.error + ' error</span> · ' : '') +
         (c.warn ? '<span style="color:#f5a623">' + c.warn + ' warning</span> · ' : '') +
         (c.info || 0) + ' info' +
-        ' <button class="btn-secondary btn-sm" style="margin-left:.5rem" onclick="fetchAlerts()">Refresh</button></span>' +
-    '</div>' +
+        '</span>' +
+    '</summary>' +
+    '<div style="display:flex;justify-content:flex-end;margin-bottom:.5rem"><button class="btn-secondary btn-sm" onclick="fetchAlerts()">Refresh</button></div>' +
     alerts.map(function(a) {
       var st = ALERT_STYLE[a.severity] || ALERT_STYLE.info
       var jump = a.tab ? '<button class="btn-secondary btn-sm" onclick="switchTab(\'' + a.tab + '\')">Open ' + a.tab + '</button>' : ''
@@ -2017,15 +2108,15 @@ function renderAlerts(d) {
           '<div style="font-size:.83rem;margin-top:.1rem">' + esc(a.title) + '</div>' +
           (a.detail ? '<div style="font-size:.73rem;color:var(--muted);margin-top:.15rem;word-break:break-word">' + esc(String(a.detail).slice(0, 300)) + '</div>' : '') +
         '</div>' + jump + '</div>'
-    }).join('') + '</div>'
+    }).join('') + '</details></div>'
 }
 
 // --- Mod dependencies ---
 // PZ silently misbehaves when a require= isn't met, so this surfaces it. Nothing is auto-fixed:
 // authors list optional companion mods in require= constantly, so every row asks rather than acts.
-// <details> state survives the innerHTML rebuild these panels do on every refresh.
+// Panel open/closed state survives the innerHTML rebuild these panels do on every refresh.
 // Both start open so a real problem is never hidden behind a collapsed panel on first load.
-var panelOpen = { deps: true, audit: true, order: false, installed: true, collections: true, add: true }
+var panelOpen = { deps: true, audit: true, order: false, installed: true, collections: true, add: true, alerts: true }
 var cachedDeps = { issues: [], ignored: [] }
 
 function fetchDependencies() {
@@ -2735,6 +2826,8 @@ function fetchNotifSettings() {
     document.getElementById('notif-token').value = d.token || ''
     document.getElementById('notif-userkey').value = d.userKey || ''
     document.getElementById('evt-serverStart').checked = !!(d.events && d.events.serverStart)
+    // Defaults on: the point of this event is that "restarted" fires minutes too early.
+    document.getElementById('evt-serverReady').checked = (d.events || {}).serverReady !== false
     document.getElementById('evt-serverStop').checked = !!(d.events && d.events.serverStop)
     document.getElementById('evt-serverCrash').checked = !!(d.events && d.events.serverCrash)
     document.getElementById('evt-downloadComplete').checked = !!(d.events && d.events.downloadComplete)
@@ -2778,6 +2871,7 @@ function saveNotifSettings(cb) {
     userKey: document.getElementById('notif-userkey').value.trim(),
     events: {
       serverStart: document.getElementById('evt-serverStart').checked,
+      serverReady: document.getElementById('evt-serverReady').checked,
       serverStop: document.getElementById('evt-serverStop').checked,
       serverCrash: document.getElementById('evt-serverCrash').checked,
       downloadComplete: document.getElementById('evt-downloadComplete').checked,
