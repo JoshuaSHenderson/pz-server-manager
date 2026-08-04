@@ -1631,7 +1631,7 @@ function fetchModOrder() {
 }
 
 function orderDirty() {
-  return orderState.mods.map(function(m) { return m.modId }).join(' ') !== orderState.original.join(' ')
+  return orderState.mods.map(function(m) { return m.modId }).join(' ') !== orderState.original.join(' ')
 }
 
 function toggleOrderEditor() {
@@ -1759,13 +1759,21 @@ function renderAudit() {
   }
   var mb = function(b) { return b > 1073741824 ? (b / 1073741824).toFixed(1) + ' GB' : Math.round(b / 1048576) + ' MB' }
 
+  // Deleting everything at once is the point of this panel for most people, but it is the most
+  // destructive button in the UI — so it states the count and size up front and confirms twice.
+  var orphanCount = (d.unregistered || []).length + (d.orphanFolders || []).length
+  var deleteAll = orphanCount
+    ? '<button class="btn-danger btn-sm" style="margin-left:.4rem" onclick="deleteAllOrphans()">Delete all (' + orphanCount + ' · ' + d.reclaimableHuman + ')</button>'
+    : ''
+
   el.innerHTML = '<div class="card" style="margin-bottom:1rem;border-left:3px solid #f5a623">' +
-    '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">' +
-      '<div class="card-title" style="margin-bottom:0">Mod &amp; game folder audit</div>' +
+    '<details' + (panelOpen.audit ? ' open' : '') + ' ontoggle="panelOpen.audit = this.open">' +
+    '<summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">' +
+      '<span class="card-title" style="margin-bottom:0">Orphaned Mod Folders <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + orphanCount + ')</span></span>' +
       '<span style="font-size:.75rem;color:var(--muted)">' + d.registered + ' registered · ' + d.enabled + ' loaded · ' + d.onDisk + ' on disk · ' +
       '<strong>' + d.reclaimableHuman + ' reclaimable</strong> · ' + d.freeHuman + ' free' +
-      ' <button class="btn-secondary btn-sm" style="margin-left:.4rem" onclick="fetchAudit()">Rescan</button></span>' +
-    '</div>' +
+      ' <button class="btn-secondary btn-sm" style="margin-left:.4rem" onclick="event.preventDefault();fetchAudit()">Rescan</button>' + deleteAll + '</span>' +
+    '</summary>' +
     section('Registered but no files on disk — the server cannot load these', d.missingContent || [], function(id) {
       return row('<span class="mono">' + esc(id) + '</span>', 'in WorkshopItems, nothing downloaded',
         '<button class="btn-secondary btn-sm" onclick="retryDownload(\'' + esc(id) + '\')">Re-download</button>')
@@ -1783,7 +1791,32 @@ function renderAudit() {
       return row('<span class="mono">' + esc(o.folder) + '</span>', mb(o.bytes) + ' · no registered Workshop item',
         '<button class="btn-danger btn-sm" onclick="deleteOrphan(\'folder\', decodeURIComponent(\'' + encodeURIComponent(o.folder) + '\'))">Delete</button>')
     }) +
-    '</div>'
+    '</details></div>'
+}
+
+// Two confirms: the first states what and how much, the second is a deliberate speed bump before
+// an irreversible bulk delete. The server recomputes the audit anyway, so a stale page can only
+// ever delete things that are still orphaned.
+function deleteAllOrphans() {
+  var d = cachedAudit || {}
+  var n = (d.unregistered || []).length + (d.orphanFolders || []).length
+  if (!n) return
+  if (!confirm('Delete all ' + n + ' orphaned items?\n\n' +
+      (d.unregistered || []).length + ' unregistered Workshop item(s)\n' +
+      (d.orphanFolders || []).length + ' stray mods folder(s)\n\n' +
+      'Frees roughly ' + d.reclaimableHuman + '. None are referenced by servertest.ini, so nothing currently loaded is affected.')) return
+  if (!confirm('This cannot be undone.\n\nRe-downloading any of these later means fetching them from Steam again. Continue?')) return
+  showMsg('mods-msg', 'Deleting ' + n + ' orphaned item(s)...', 'info', 0)
+  fetch('/api/audit/orphans', { method: 'DELETE' })
+    .then(function(r) { return r.json().then(function(x) { return { ok: r.ok, d: x } }) })
+    .then(function(x) {
+      if (!x.ok || !x.d.success) throw new Error(x.d.error || 'delete failed')
+      var msg = 'Deleted ' + x.d.deleted + ' orphaned item(s) — freed ' + x.d.freed + '.'
+      if ((x.d.failed || []).length) msg += ' ' + x.d.failed.length + ' could not be removed.'
+      showMsg('mods-msg', msg, (x.d.failed || []).length ? 'error' : 'success', 10000)
+      fetchAudit(); fetchAlerts()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Delete all failed: ' + e.message, 'error', 0) })
 }
 
 function deleteOrphan(kind, id) {
@@ -1847,6 +1880,9 @@ function renderAlerts(d) {
 // --- Mod dependencies ---
 // PZ silently misbehaves when a require= isn't met, so this surfaces it. Nothing is auto-fixed:
 // authors list optional companion mods in require= constantly, so every row asks rather than acts.
+// <details> state survives the innerHTML rebuild these panels do on every refresh.
+// Both start open so a real problem is never hidden behind a collapsed panel on first load.
+var panelOpen = { deps: true, audit: true }
 var cachedDeps = { issues: [], ignored: [] }
 
 function fetchDependencies() {
@@ -1912,15 +1948,16 @@ function renderDependencies() {
 
   var blocking = issues.filter(function(i) { return i.type === 'incompatible' || i.type === 'missing' }).length
   el.innerHTML = '<div class="card" style="margin-bottom:1rem;border-left:3px solid ' + (blocking ? '#e74c3c' : '#f5a623') + '">' +
-    '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">' +
-      '<div class="card-title" style="margin-bottom:0">Dependency issues <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + issues.length + ')</span></div>' +
+    '<details' + (panelOpen.deps ? ' open' : '') + ' ontoggle="panelOpen.deps = this.open">' +
+    '<summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">' +
+      '<span class="card-title" style="margin-bottom:0">Dependency issues <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + issues.length + ')</span></span>' +
       '<span style="font-size:.75rem;color:var(--muted)">Checked ' + cachedDeps.checked + ' loaded mods' +
         (ignored ? ' · ' + ignored + ' ignored <a href="#" onclick="showIgnoredDeps();return false" style="color:#60a5fa">(review)</a>' : '') + '</span>' +
-    '</div>' +
-    '<div style="font-size:.76rem;color:var(--muted);margin-bottom:.7rem">' +
+    '</summary>' +
+    '<div style="font-size:.76rem;color:var(--muted);margin:.7rem 0">' +
       'Read from each mod\'s <span class="mono">mod.info</span>. Authors often list optional companion mods as required — ' +
       'use <strong>Not required</strong> to dismiss those. Nothing is changed automatically.</div>' +
-    rows + '</div>'
+    rows + '</details></div>'
 }
 
 function depEnable(modId) {

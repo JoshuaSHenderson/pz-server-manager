@@ -1816,6 +1816,29 @@ app.delete('/api/audit/orphan', (req, res) => {
   res.json({ success: true, kind, id, freed: humanBytes(bytes) })
 })
 
+// Bulk removal of every orphan the audit currently reports. The audit is recomputed here rather
+// than trusting a list from the client, so a stale page can never delete something that has since
+// become referenced. Only the two unreferenced categories are touched — missingContent and
+// phantomEnabled are ini problems, not files, and are never deleted.
+app.delete('/api/audit/orphans', (req, res) => {
+  const s = srv(req)
+  let audit
+  try { audit = auditServer(s) } catch (e) { return res.status(500).json({ error: e.message }) }
+
+  const targets = []
+  for (const u of audit.unregistered) targets.push({ kind: 'workshop', id: u.workshopId, path: path.join(workshopContent(s), u.workshopId), bytes: u.bytes })
+  for (const o of audit.orphanFolders) targets.push({ kind: 'folder', id: o.folder, path: path.join(modsDir(s), o.folder), bytes: o.bytes })
+
+  const deleted = []
+  const failed = []
+  let freed = 0
+  for (const t of targets) {
+    try { execSync('rm -rf ' + JSON.stringify(t.path)); deleted.push({ kind: t.kind, id: t.id }); freed += t.bytes }
+    catch (e) { failed.push({ kind: t.kind, id: t.id, error: e.message }) }
+  }
+  res.json({ success: true, deleted: deleted.length, failed, freed: humanBytes(freed), freedBytes: freed })
+})
+
 // --- Mod dependencies ---
 //
 // PZ won't tell you a dependency is unmet; the mod just misbehaves in-game. These endpoints read
