@@ -477,7 +477,6 @@ function updateDiscordStatus(cb) {
         const [name, status, startedAt] = line.replace(/^\//, '').split('|')
         states[name] = { status, startedAt }
       }
-      const anyOnline = servers.some(s => (states[s.container] || {}).status === 'running')
 
       let pending = servers.length || 1
       const versions = {}
@@ -490,7 +489,10 @@ function updateDiscordStatus(cb) {
       function sendCard(versions) {
         let body
         if (cfg.discord.richCard) {
-          const fields = []
+          // One embed per server with inline fields. Discord lays inline fields out three to a
+          // row, which is the only thing in an embed that actually aligns into columns —
+          // markdown tables are not rendered, and a code block would kill the collection link.
+          const embeds = []
           for (const s of servers) {
             const st = states[s.container] || {}
             const isOnline = st.status === 'running'
@@ -500,51 +502,40 @@ function updateDiscordStatus(cb) {
               const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000)
               uptime = h > 0 ? h + 'h ' + m + 'm' : m + 'm'
             }
-            // Everything a player needs to decide whether to join and how, without asking:
-            // status, where to connect, how busy it is, the rules, and where to get the mods.
-            let title = serverLabel(s), modCount = '—', port = '', maxPlayers = '', pvp = '', pub = '', locked = false
+            let modCount = '—', port = '', maxPlayers = ''
             try {
               modCount = String(getIniList(s, 'WorkshopItems').length)
               port = getIniValue(s, 'DefaultPort', '')
               maxPlayers = getIniValue(s, 'MaxPlayers', '')
-              pvp = getIniValue(s, 'PVP', '')
-              pub = getIniValue(s, 'Public', '')
-              locked = !!getIniValue(s, 'Password', '')
             } catch {}
             const players = isOnline ? onlinePlayersFor(s) : []
             const version = versions[s.id]
 
-            const lines = []
-            lines.push((isOnline ? '🟢 **Online**' : '🔴 **Offline**') +
-              (version ? ' · `v' + version + '`' : '') +
-              (isOnline ? ' · up ' + uptime : ''))
-
-            if (port) {
-              // The public address is what someone outside the LAN needs; the LAN one is what
-              // people in the house actually use, and they are rarely the same.
-              const addrs = []
-              if (externalIp) addrs.push('`' + externalIp + ':' + port + '`')
-              if (s.connect) addrs.push('LAN `' + s.connect + '`')
-              if (addrs.length) lines.push('🔌 ' + addrs.join('  ·  '))
+            const fields = [
+              { name: 'Status', value: isOnline ? '🟢 Online' : '🔴 Offline', inline: true },
+              { name: 'Players', value: '**' + players.length + '**' + (maxPlayers ? ' / ' + maxPlayers : ''), inline: true },
+              { name: 'Uptime', value: isOnline ? uptime : '—', inline: true },
+              { name: 'Connect', value: (externalIp && port) ? '`' + externalIp + ':' + port + '`' : '—', inline: true },
+              { name: 'Mods', value: modCount, inline: true },
+              { name: 'Version', value: version ? '`' + version + '`' : '—', inline: true }
+            ]
+            if (players.length) {
+              fields.push({ name: 'Online now', value: players.slice(0, 20).join(', ') + (players.length > 20 ? ', …' : ''), inline: false })
             }
-
-            lines.push('👥 **' + players.length + (maxPlayers ? '/' + maxPlayers : '') + '** online' +
-              (players.length ? ' — ' + players.slice(0, 15).join(', ') + (players.length > 15 ? ', …' : '') : ''))
-
-            const rules = []
-            if (pvp) rules.push(pvp === 'true' ? '⚔️ PVP on' : '🕊️ PVP off')
-            rules.push(locked ? '🔒 Password' : '🔓 Open')
-            if (pub) rules.push(pub === 'true' ? '📡 Public listing' : '📕 Unlisted')
-            if (rules.length) lines.push(rules.join('  ·  '))
-
             // Tracked collections, so people can subscribe to the server's mod list from Discord
             // rather than being sent a list of Workshop ids.
             const collLinks = collectionLinks(s)
-            lines.push('🧩 **' + modCount + ' mods**' + (collLinks ? ' — ' + collLinks : ''))
+            if (collLinks) fields.push({ name: 'Mod Collection', value: collLinks, inline: false })
 
-            fields.push({ name: title, value: lines.join('\n'), inline: false })
+            embeds.push({
+              title: serverLabel(s),
+              color: isOnline ? 5763719 : 15548997,
+              fields
+            })
           }
-          body = { embeds: [{ title: 'Project Zomboid Servers', color: anyOnline ? 5763719 : 15548997, fields, timestamp: new Date().toISOString() }] }
+          // Discord shows the timestamp under the last embed only, so it goes there.
+          if (embeds.length) embeds[embeds.length - 1].timestamp = new Date().toISOString()
+          body = { embeds: embeds.length ? embeds : [{ title: 'Project Zomboid Servers', description: 'No servers found.', color: 15548997 }] }
         } else {
           const stats = servers.map(s => {
             const isOnline = (states[s.container] || {}).status === 'running'
