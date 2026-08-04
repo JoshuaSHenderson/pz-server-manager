@@ -23,7 +23,8 @@ r = replay([
   '[14-07-26 22:49:11.177] ' + ID2 + ' "Henderson" removed connection index=0.',
   '[14-07-26 22:49:11.189] ' + ID2 + ' "Henderson" disconnected player (10096,8261,0).'
 ].join('\n'))
-assert.deepStrictEqual(r.events.map(e => e.type + ':' + e.name), ['join:Henderson', 'leave:Henderson'])
+assert.deepStrictEqual(r.events.map(e => e.type + ':' + e.name),
+  ['join:Henderson', 'spawn:Henderson', 'leave:Henderson'])
 assert.deepStrictEqual(r.online, [])
 
 // --- the original bug: "fully connected" repeats on respawn and must never be a join ---
@@ -33,8 +34,25 @@ r = replay([
   'user Rick died at (1,2,3) (non pvp).',
   ID + ' "Rick" fully connected (4,5,6).'
 ].join('\n'))
-assert.deepStrictEqual(r.events.map(e => e.type), ['join'], 'respawn must not raise a second join')
+assert.deepStrictEqual(r.events.map(e => e.type), ['join', 'spawn', 'spawn'],
+  'respawn is a spawn, never a second join')
 assert.deepStrictEqual(r.online, ['Rick'])
+
+// The second spawn of a session is flagged as a respawn so the alert can say so.
+const spawns = r.events.filter(e => e.type === 'spawn')
+assert.strictEqual(spawns[0].respawn, false)
+assert.strictEqual(spawns[1].respawn, true)
+assert.strictEqual(spawns[0].name, 'Rick')
+
+// A fresh session starts over: the first spawn after rejoining is not a respawn.
+r = replay([
+  ID + ' "Rick" allowed to join.',
+  ID + ' "Rick" fully connected (1,2,3).',
+  'Connection remove index=0 guid=1 id=' + ID + '.',
+  ID + ' "Rick" allowed to join.',
+  ID + ' "Rick" fully connected (1,2,3).'
+].join('\n'))
+assert.deepStrictEqual(r.events.filter(e => e.type === 'spawn').map(e => e.respawn), [false, false])
 
 // --- two players, independent sessions ---
 r = replay([

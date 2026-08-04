@@ -19,17 +19,19 @@
 //
 // "fully connected" is deliberately NOT a join signal: PZ writes it every time a character enters
 // the world, including respawning after death, which produced join alerts for players who never
-// left.
+// left. It is reported separately as a 'spawn' event — that repeat is exactly what makes it
+// useful for "someone is now in the world", and useless as a join.
 
 const JOIN = /(\d{6,})\s+"([^"]+)"\s+allowed to join/
+const SPAWN = /(\d{6,})\s+"([^"]+)"\s+fully connected/
 const LEAVE_NAMED = /"([^"]+)"\s+(?:disconnected player|removed connection)/
 const LEAVE_BY_ID = /Connection (?:disconnect|remove)\b.*?\bid=(\d{6,})/
 
 // Feed lines in order. Returns the events that actually represent a state change, so a duplicate
 // "disconnect" then "remove" for the same session yields one leave, not two.
 //
-// state: { online: Map<steamId, name>, namesOnly: Set<name> }
-function makeState() { return { online: new Map(), namesOnly: new Set() } }
+// state: { online: Map<steamId, name>, namesOnly: Set<name>, spawned: Set<steamId> }
+function makeState() { return { online: new Map(), namesOnly: new Set(), spawned: new Set() } }
 
 function applyLine(state, line) {
   let m
@@ -39,12 +41,21 @@ function applyLine(state, line) {
     state.online.set(id, name)
     return { type: 'join', name, steamId: id }
   }
+  // Entering the world: first spawn and every respawn after death. Reported every time by
+  // design, and never treated as a connection.
+  if ((m = line.match(SPAWN))) {
+    const [, id, name] = m
+    const respawn = state.spawned.has(id)
+    state.spawned.add(id)
+    return { type: 'spawn', name, steamId: id, respawn }
+  }
   if ((m = line.match(LEAVE_BY_ID))) {
     const id = m[1]
     const name = state.online.get(id)
     if (name === undefined) return null
     state.online.delete(id)
     state.namesOnly.delete(name)
+    state.spawned.delete(id)
     return { type: 'leave', name, steamId: id }
   }
   if ((m = line.match(LEAVE_NAMED))) {
@@ -54,6 +65,7 @@ function applyLine(state, line) {
       if (n === name) {
         state.online.delete(id)
         state.namesOnly.delete(name)
+        state.spawned.delete(id)
         return { type: 'leave', name, steamId: id }
       }
     }

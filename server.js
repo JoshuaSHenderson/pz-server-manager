@@ -750,7 +750,7 @@ function pollUserLog(s) {
   const cfg = readNotifConfig()
   if (!cfg.enabled || !cfg.events) return
   const ev = cfg.events
-  if (!ev.playerJoin && !ev.playerLeave && !ev.playerDied && !ev.playerKicked) return
+  if (!ev.playerJoin && !ev.playerLeave && !ev.playerSpawned && !ev.playerDied && !ev.playerKicked) return
 
   const latest = findLatestUserLog(s)
   if (!latest) return
@@ -789,6 +789,10 @@ function pollUserLog(s) {
       if (evt) {
         if (evt.type === 'join' && ev.playerJoin) pushoverFor(s, 'Player Joined', evt.name + ' joined the server')
         if (evt.type === 'leave' && ev.playerLeave) pushoverFor(s, 'Player Left', evt.name + ' left the server')
+        // Off by default: this fires on every respawn, so on a deadly server it is chatty.
+        if (evt.type === 'spawn' && ev.playerSpawned) {
+          pushoverFor(s, 'Player Spawned', evt.name + (evt.respawn ? ' respawned into the world' : ' spawned into the world'))
+        }
         continue
       }
       let m
