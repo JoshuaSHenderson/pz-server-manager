@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PZ Server Manager</title>
+<link rel="icon" type="image/png" href="/server-icon.png">
+<link rel="apple-touch-icon" href="/server-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Rajdhani:wght@600;700&display=swap" rel="stylesheet">
@@ -99,7 +101,9 @@ a:hover { color: #93c5fd; text-decoration: underline }
   border: 1px solid rgba(244,63,94,.4);
   box-shadow: 0 0 22px rgba(244,63,94,.22), inset 0 1px 0 rgba(255,255,255,.08);
   color: var(--accent);
+  overflow: hidden;
 }
+.brand-mark img { width: 100%; height: 100%; object-fit: contain; display: block; padding: 3px; box-sizing: border-box }
 .logo { font-family: var(--font-display); font-size: 1.15rem; font-weight: 700; letter-spacing: .08em; line-height: 1.1; text-transform: uppercase; white-space: nowrap }
 .logo small { display: block; font-size: .58rem; font-weight: 600; letter-spacing: .32em; color: var(--muted) }
 
@@ -515,7 +519,7 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
   <aside class="sidebar">
     <div class="brand">
       <div class="brand-mark">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="10" r="7"/><path d="M9 17v3h6v-3"/><circle cx="9.5" cy="9.5" r="1" fill="currentColor" stroke="none"/><circle cx="14.5" cy="9.5" r="1" fill="currentColor" stroke="none"/><path d="M12 12.5v1.5"/></svg>
+        <img src="/server-icon.png" alt="Server icon">
       </div>
       <div class="logo">PZ Server<small>Manager // Ops</small></div>
     </div>
@@ -1080,6 +1084,15 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <div>
           <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Webhook URL</label>
           <input type="text" id="discord-webhook" style="width:100%;font-family:var(--font-mono)" placeholder="https://discord.com/api/webhooks/...">
+        </div>
+        <div>
+          <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Server icon URL (optional)</label>
+          <input type="text" id="discord-icon" style="width:100%;font-family:var(--font-mono)" placeholder="https://cdn.discordapp.com/attachments/...">
+          <p style="font-size:.75rem;color:var(--muted);margin:.35rem 0 0">
+            Shown as the card thumbnail and the webhook avatar. Discord fetches this itself, so it must be reachable
+            from the internet — this manager's own <span class="mono">/server-icon.png</span> is only on your LAN.
+            Easiest source: drop the image in any Discord channel, right-click it and Copy Link.
+          </p>
         </div>
         <div>
           <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem;margin-bottom:.75rem">
@@ -2851,6 +2864,7 @@ function fetchNotifSettings() {
     document.getElementById('discord-webhook').value = disc.webhookUrl || ''
     document.getElementById('discord-richcard').checked = !!disc.richCard
     document.getElementById('discord-template').value = disc.template || ''
+    document.getElementById('discord-icon').value = disc.iconUrl || ''
     document.getElementById('discord-messageid').value = disc.messageId || ''
     toggleDiscordMode()
     fetchDetectedInfo()
@@ -2894,6 +2908,7 @@ function saveNotifSettings(cb) {
       webhookUrl: document.getElementById('discord-webhook').value.trim(),
       messageId: document.getElementById('discord-messageid').value.trim(),
       richCard: document.getElementById('discord-richcard').checked,
+      iconUrl: document.getElementById('discord-icon').value.trim(),
       template: document.getElementById('discord-template').value
     }
   }

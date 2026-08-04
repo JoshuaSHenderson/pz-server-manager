@@ -540,11 +540,15 @@ function updateDiscordStatus(cb) {
             const collLinks = collectionLinks(s)
             if (collLinks) lines.push(row('Mod Collection', collLinks))
 
-            embeds.push({
+            const embed = {
               title: serverLabel(s),
               color: isOnline ? 5763719 : 15548997,
               description: lines.join('\n')
-            })
+            }
+            // Discord fetches this URL itself, so it has to be reachable from the internet —
+            // the manager's own /server-icon.png is LAN-only and would render broken.
+            if (cfg.discord.iconUrl) embed.thumbnail = { url: cfg.discord.iconUrl }
+            embeds.push(embed)
           }
           // Discord shows the timestamp under the last embed only, so it goes there.
           if (embeds.length) embeds[embeds.length - 1].timestamp = new Date().toISOString()
@@ -574,6 +578,11 @@ function updateDiscordStatus(cb) {
             .replace('<LastUpdated>', new Date().toUTCString())
           body = { content }
         }
+        // Webhook avatar. Only honoured when the message is first posted — Discord ignores
+        // username/avatar_url on a PATCH — so an icon change shows up after the message is
+        // recreated, not on the next edit.
+        if (cfg.discord.iconUrl) body.avatar_url = cfg.discord.iconUrl
+
         const save = id => { cfg.discord.messageId = id; writeNotifConfig(cfg) }
         if (cfg.discord.messageId) {
           discordRequest('PATCH', '/webhooks/' + wh.id + '/' + wh.token + '/messages/' + cfg.discord.messageId, body, (e, data, status) => {
