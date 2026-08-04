@@ -41,4 +41,30 @@ assert.deepStrictEqual(src, ['A', 'B', 'C'])
 // A move is always a permutation, which is what validateReorder demands.
 assert.deepStrictEqual(validateReorder(src, moveItem(src, 0, 2)), { ok: true })
 
+// The UI moves rows in the DOM instead of re-rendering the list, to keep scroll position and
+// focus. That path does removeChild(children[from]) then insertBefore(node, children[target]),
+// where children[] has already shifted after the removal. Simulate it and assert it agrees with
+// moveItem for every from/to pair — this is exactly where an off-by-one would silently corrupt
+// the order the user then saves.
+function domMove(list, from, to) {
+  const kids = list.slice()
+  const last = kids.length - 1
+  const target = Math.max(0, Math.min(last, to))
+  const [node] = kids.splice(from, 1)          // removeChild
+  const ref = kids[target]                     // children[target] AFTER removal, or undefined
+  const at = ref === undefined ? kids.length : kids.indexOf(ref)
+  kids.splice(at, 0, node)                     // insertBefore(node, ref || null)
+  return kids
+}
+const sample = ['A', 'B', 'C', 'D', 'E']
+for (let from = 0; from < sample.length; from++) {
+  for (let to = 0; to < sample.length; to++) {
+    assert.deepStrictEqual(domMove(sample, from, to), moveItem(sample, from, to),
+      'DOM move disagrees with moveItem for ' + from + '->' + to)
+  }
+}
+// Clamped targets must agree too — Top/Bottom pass out-of-range values.
+assert.deepStrictEqual(domMove(sample, 2, -3), moveItem(sample, 2, -3))
+assert.deepStrictEqual(domMove(sample, 2, 99), moveItem(sample, 2, 99))
+
 console.log('order: all assertions passed')

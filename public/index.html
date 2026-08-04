@@ -639,7 +639,9 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
 
     <!-- Add content -->
     <div class="card">
-      <div class="card-title">Add Content</div>
+      <details id="addcontent-details" open ontoggle="panelOpen.add = this.open">
+      <summary style="cursor:pointer"><span class="card-title" style="margin-bottom:0">Add Content</span></summary>
+      <div style="margin-top:.9rem"></div>
       <div class="row" style="margin-bottom:.6rem">
         <input type="text" id="workshop-input" placeholder="Workshop mod ID or URL">
         <button class="btn-primary" id="install-btn" onclick="installMod()">Add Mod</button>
@@ -649,12 +651,16 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <button class="btn-primary" id="install-collection-btn" onclick="addCollection()">Add Collection</button>
       </div>
       <p style="margin-top:.6rem;font-size:.78rem;color:var(--muted)">Paste an ID or a full <span class="mono">steamcommunity.com/sharedfiles/filedetails/?id=…</span> URL. Collections are tracked below and expand nested collections automatically.</p>
+      </details>
     </div>
 
     <!-- Tracked collections -->
     <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;gap:1rem;flex-wrap:wrap">
-        <div class="card-title" style="margin-bottom:0">Collections</div>
+      <details id="collections-details" open ontoggle="panelOpen.collections = this.open">
+      <summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+        <span class="card-title" style="margin-bottom:0">Collections</span>
+      </summary>
+      <div style="display:flex;align-items:center;justify-content:flex-end;margin:.9rem 0;gap:1rem;flex-wrap:wrap">
         <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
           <label style="display:flex;align-items:center;gap:.45rem;cursor:pointer;font-size:.8rem;color:var(--muted)">
             <input type="checkbox" id="autosync-enabled" onchange="saveAutoSync()"> Auto-sync every
@@ -670,25 +676,33 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         </div>
       </div>
       <div id="collections-table"></div>
+      </details>
     </div>
 
     <!-- Installed mods -->
+    <!-- Each of these renders its own collapsible card, so they are siblings rather than nested
+         inside Installed Mods. -->
+    <div id="mods-deps"></div>
+    <div id="mods-audit"></div>
+    <div id="mods-order"></div>
+
     <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;gap:1rem;flex-wrap:wrap">
-        <div class="card-title" style="margin-bottom:0">Installed Mods</div>
-        <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap">
+      <details id="installed-details" open ontoggle="panelOpen.installed = this.open">
+        <summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+          <span class="card-title" style="margin-bottom:0">Installed Mods</span>
+          <span id="mod-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap"></span>
+        </summary>
+        <!-- Filter controls live in the body, not the summary: a form control inside a summary
+             element toggles the panel when clicked. -->
+        <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap;margin:.9rem 0">
           <input type="text" id="mod-filter" placeholder="Filter by name, ID, tag, collection..." oninput="renderModsTable(cachedMods)" style="width:220px;padding:.35rem .55rem;font-size:.82rem">
           <select id="mod-type" class="server-select" style="width:auto;margin:0;padding:.35rem .5rem;font-size:.82rem" onchange="renderModsTable(cachedMods)" title="Filter by Workshop tag">
             <option value="">All types</option>
           </select>
-          <span id="mod-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap"></span>
         </div>
-      </div>
-      <div id="mods-problems"></div>
-      <div id="mods-deps"></div>
-      <div id="mods-audit"></div>
-      <div id="mods-order"></div>
-      <div id="mods-table"></div>
+        <div id="mods-problems"></div>
+        <div id="mods-table"></div>
+      </details>
     </div>
 
     <!-- Recent download activity (collapsed by default — no longer in the way) -->
@@ -1632,7 +1646,7 @@ function setModEnabled(cb, modId) {
 // Mods= is load order: later entries win, and loadModAfter= mods expect to sit behind their
 // dependencies. Edits are staged locally and only written when Save is pressed, so a mis-drag
 // costs nothing until then.
-var orderState = { mods: [], original: [], backups: [], open: false }
+var orderState = { mods: [], original: [], backups: [] }
 
 function fetchModOrder() {
   fetch('/api/mods/order').then(function(r) { return r.json() }).then(function(d) {
@@ -1647,37 +1661,12 @@ function orderDirty() {
   return orderState.mods.map(function(m) { return m.modId }).join(' ') !== orderState.original.join(' ')
 }
 
-function toggleOrderEditor() {
-  orderState.open = !orderState.open
-  if (orderState.open) fetchModOrder()
-  else renderModOrder()
-}
-
 function renderModOrder() {
   var el = document.getElementById('mods-order')
   if (!el) return
-  if (!orderState.open) {
-    el.innerHTML = '<div style="margin-bottom:1rem">' +
-      '<button class="btn-secondary btn-sm" onclick="toggleOrderEditor()">Edit load order</button>' +
-      '<span style="font-size:.75rem;color:var(--muted);margin-left:.6rem">Mods= order decides which mod wins when two change the same thing.</span></div>'
-    return
-  }
-  var dirty = orderDirty()
-  var rows = orderState.mods.map(function(m, i) {
-    // A mod that must load after another is flagged inline, so the constraint is visible while moving things.
-    var after = (m.loadModAfter || []).length
-      ? '<span style="font-size:.68rem;color:#60a5fa"> after: ' + esc(m.loadModAfter.join(', ')) + '</span>' : ''
-    return '<div style="display:flex;align-items:center;gap:.5rem;padding:.25rem .5rem;border-bottom:1px solid var(--border)">' +
-      '<span class="mono" style="font-size:.7rem;color:var(--muted);width:2.6rem;text-align:right">' + (i + 1) + '</span>' +
-      '<span style="flex:1;font-size:.8rem;min-width:0;word-break:break-word">' + esc(m.modId) +
-        (m.installed ? '' : ' <span style="color:#e74c3c;font-size:.68rem">(not installed)</span>') + after + '</span>' +
-      '<button class="btn-secondary btn-sm" title="Move up" onclick="moveOrder(' + i + ',' + (i - 1) + ')"' + (i === 0 ? ' disabled' : '') + '>&#9650;</button>' +
-      '<button class="btn-secondary btn-sm" title="Move down" onclick="moveOrder(' + i + ',' + (i + 1) + ')"' + (i === orderState.mods.length - 1 ? ' disabled' : '') + '>&#9660;</button>' +
-      '<button class="btn-secondary btn-sm" title="Move to top" onclick="moveOrder(' + i + ',0)">Top</button>' +
-      '<button class="btn-secondary btn-sm" title="Move to bottom" onclick="moveOrder(' + i + ',' + (orderState.mods.length - 1) + ')">Bottom</button>' +
-      '</div>'
-  }).join('')
+  if (!orderState.mods.length) { fetchModOrder(); return }
 
+  var rows = orderState.mods.map(function(m, i) { return orderRowHtml(m, i) }).join('')
   var backups = orderState.backups.length
     ? '<div style="margin-top:.8rem;font-size:.76rem;color:var(--muted)">' +
       '<strong>Backups</strong> (a snapshot is taken automatically before every save)' +
@@ -1689,24 +1678,96 @@ function renderModOrder() {
       }).join('') + '</div>'
     : '<div style="margin-top:.8rem;font-size:.76rem;color:var(--muted)">No backups yet — one is taken automatically before each save.</div>'
 
-  el.innerHTML = '<div class="card" style="margin-bottom:1rem">' +
-    '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">' +
-      '<div class="card-title" style="margin-bottom:0">Load order <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + orderState.mods.length + ')</span></div>' +
-      '<div style="display:flex;gap:.4rem;flex-wrap:wrap">' +
-        '<button class="btn-primary btn-sm" onclick="saveModOrder()"' + (dirty ? '' : ' disabled') + '>Save order</button>' +
-        '<button class="btn-secondary btn-sm" onclick="fetchModOrder()"' + (dirty ? '' : ' disabled') + '>Discard changes</button>' +
-        '<button class="btn-secondary btn-sm" onclick="toggleOrderEditor()">Close</button>' +
-      '</div></div>' +
-    (dirty ? '<div class="msg msg-info" style="margin-bottom:.6rem;font-size:.8rem">Unsaved changes — nothing is written until you press Save order.</div>' : '') +
-    '<div style="max-height:420px;overflow-y:auto;border:1px solid var(--border);border-radius:3px">' + rows + '</div>' +
-    backups + '</div>'
+  el.innerHTML = '<div class="card">' +
+    '<details' + (panelOpen.order ? ' open' : '') + ' ontoggle="panelOpen.order = this.open">' +
+    '<summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">' +
+      '<span class="card-title" style="margin-bottom:0">Load order <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + orderState.mods.length + ')</span></span>' +
+      '<span style="font-size:.75rem;color:var(--muted)">Later entries win when two mods change the same thing</span>' +
+    '</summary>' +
+    '<div style="display:flex;gap:.4rem;flex-wrap:wrap;margin:.9rem 0 .6rem">' +
+      '<button class="btn-primary btn-sm" id="order-save" onclick="saveModOrder()" disabled>Save order</button>' +
+      '<button class="btn-secondary btn-sm" id="order-discard" onclick="fetchModOrder()" disabled>Discard changes</button>' +
+    '</div>' +
+    '<div id="order-dirty" class="msg msg-info" style="display:none;margin-bottom:.6rem;font-size:.8rem">Unsaved changes — nothing is written until you press Save order.</div>' +
+    '<div id="order-list" style="max-height:420px;overflow-y:auto;border:1px solid var(--border);border-radius:3px">' + rows + '</div>' +
+    backups + '</details></div>'
+  refreshOrderMeta()
 }
 
-function moveOrder(from, to) {
-  if (to < 0 || to >= orderState.mods.length) return
+function orderRowHtml(m, i) {
+  // A mod that must load after another is flagged inline, so the constraint is visible while moving things.
+  var after = (m.loadModAfter || []).length
+    ? '<span style="font-size:.68rem;color:#60a5fa"> after: ' + esc(m.loadModAfter.join(', ')) + '</span>' : ''
+  var arg = "'" + encodeURIComponent(m.modId) + "'"
+  return '<div class="order-row" style="display:flex;align-items:center;gap:.5rem;padding:.25rem .5rem;border-bottom:1px solid var(--border)">' +
+    '<span class="ord-num mono" style="font-size:.7rem;color:var(--muted);width:2.6rem;text-align:right">' + (i + 1) + '</span>' +
+    '<span style="flex:1;font-size:.8rem;min-width:0;word-break:break-word">' + esc(m.modId) +
+      (m.installed ? '' : ' <span style="color:#e74c3c;font-size:.68rem">(not installed)</span>') + after + '</span>' +
+    '<button class="btn-secondary btn-sm ord-up" title="Move up" onclick="moveOrderBy(this, decodeURIComponent(' + arg + '), -1)">&#9650;</button>' +
+    '<button class="btn-secondary btn-sm ord-down" title="Move down" onclick="moveOrderBy(this, decodeURIComponent(' + arg + '), 1)">&#9660;</button>' +
+    '<button class="btn-secondary btn-sm" title="Move to top" onclick="moveOrderEdge(this, decodeURIComponent(' + arg + '), \'top\')">Top</button>' +
+    '<button class="btn-secondary btn-sm" title="Move to bottom" onclick="moveOrderEdge(this, decodeURIComponent(' + arg + '), \'bottom\')">Bottom</button>' +
+    '</div>'
+}
+
+// Moves reorder the existing DOM nodes instead of re-rendering the list. Rebuilding it would
+// reset the scroll position and blow away focus, so a second click on the same row would land
+// somewhere else entirely. Row identity is the mod id, not an index, so no handler needs rebinding.
+function applyOrderMove(btn, modId, to) {
+  var ids = orderState.mods.map(function(m) { return m.modId })
+  var from = ids.indexOf(modId)
+  if (from === -1) return
+  var last = orderState.mods.length - 1
+  var target = Math.max(0, Math.min(last, to))
+  if (target === from) return
+
   var item = orderState.mods.splice(from, 1)[0]
-  orderState.mods.splice(to, 0, item)
-  renderModOrder()
+  orderState.mods.splice(target, 0, item)
+
+  var list = document.getElementById('order-list')
+  if (list) {
+    var node = list.children[from]
+    list.removeChild(node)
+    // After the removal every later index shifts down one, so children[target] is exactly the
+    // element the node must sit in front of — and undefined (append) when it belongs last.
+    list.insertBefore(node, list.children[target] || null)
+    // Keep the row visible when it is pushed past the edge of the scroll area.
+    if (node.scrollIntoView) node.scrollIntoView({ block: 'nearest' })
+  }
+  refreshOrderMeta()
+  if (btn && btn.focus) btn.focus()
+}
+
+function moveOrderBy(btn, modId, delta) {
+  var from = orderState.mods.map(function(m) { return m.modId }).indexOf(modId)
+  if (from === -1) return
+  applyOrderMove(btn, modId, from + delta)
+}
+
+function moveOrderEdge(btn, modId, where) {
+  applyOrderMove(btn, modId, where === 'top' ? 0 : orderState.mods.length - 1)
+}
+
+// Renumbers rows and syncs the Save/Discard state after an in-place move.
+function refreshOrderMeta() {
+  var list = document.getElementById('order-list')
+  if (list) {
+    var kids = list.children
+    for (var i = 0; i < kids.length; i++) {
+      var num = kids[i].querySelector('.ord-num')
+      if (num) num.textContent = i + 1
+      var up = kids[i].querySelector('.ord-up'), down = kids[i].querySelector('.ord-down')
+      if (up) up.disabled = (i === 0)
+      if (down) down.disabled = (i === kids.length - 1)
+    }
+  }
+  var dirty = orderDirty()
+  var save = document.getElementById('order-save')
+  var discard = document.getElementById('order-discard')
+  var banner = document.getElementById('order-dirty')
+  if (save) save.disabled = !dirty
+  if (discard) discard.disabled = !dirty
+  if (banner) banner.style.display = dirty ? '' : 'none'
 }
 
 function saveModOrder() {
@@ -1895,7 +1956,7 @@ function renderAlerts(d) {
 // authors list optional companion mods in require= constantly, so every row asks rather than acts.
 // <details> state survives the innerHTML rebuild these panels do on every refresh.
 // Both start open so a real problem is never hidden behind a collapsed panel on first load.
-var panelOpen = { deps: true, audit: true }
+var panelOpen = { deps: true, audit: true, order: false, installed: true, collections: true, add: true }
 var cachedDeps = { issues: [], ignored: [] }
 
 function fetchDependencies() {
