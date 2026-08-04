@@ -10,6 +10,7 @@ const { prunableItems } = require('./prune')
 const { parseDepList, analyzeDependencies, sortIssues } = require('./deps')
 const { validateReorder } = require('./order')
 const { outdatedItems, seedState, dueForCheck, shouldRestart } = require('./autoupdate')
+const { makeState: makePlayerState, applyLine: applyPlayerLine, replay: replayPlayerLog, onlineNames: playerNames } = require('./players')
 
 const app = express()
 app.use(express.json())
@@ -731,14 +732,7 @@ function onlinePlayersFor(s) {
   const logFile = findLatestUserLog(s)
   if (!logFile) return []
   try {
-    const content = fs.readFileSync(logFile, 'utf8')
-    const online = new Set()
-    for (const line of content.split('\n')) {
-      let m
-      if ((m = line.match(/"([^"]+)" fully connected/))) online.add(m[1])
-      else if ((m = line.match(/"([^"]+)" disconnected player/)) || (m = line.match(/"([^"]+)" removed connection/))) online.delete(m[1])
-    }
-    return Array.from(online)
+    return replayPlayerLog(fs.readFileSync(logFile, 'utf8')).online
   } catch { return [] }
 }
 
@@ -765,8 +759,17 @@ function pollUserLog(s) {
   try {
     const size = fs.statSync(latest).size
     if (latest !== st.userLogPath) {
+      // Seed from the whole file before skipping to the end. Without this the online map starts
+      // empty, so anyone who connected before the manager (re)started would leave with nothing to
+      // match against and no "Player Left" would ever fire. Events from the replay are discarded —
+      // they already happened.
       st.userLogPath = latest
       st.userLogPos = size
+      try {
+        st.players = replayPlayerLog(fs.readFileSync(latest, 'utf8')).state
+        const names = playerNames(st.players)
+        logFor(s, 'watching ' + path.basename(latest) + (names.length ? ' — ' + names.length + ' player(s) already connected: ' + names.join(', ') : ' — nobody connected'))
+      } catch { st.players = makePlayerState() }
       return
     }
     if (size <= st.userLogPos) return
@@ -777,30 +780,18 @@ function pollUserLog(s) {
     fs.closeSync(fd)
     st.userLogPos = size
 
-    // Connection state is tracked rather than notifying per matching line. PZ writes
-    // "fully connected" every time a character enters the world, which includes respawning after
-    // death — that produced a "joined the server" alert for someone who never left. In one real
-    // log: 14 "allowed to join" against 18 "fully connected", the extra four being respawns.
-    // "allowed to join" is the actual connection event, and the online set makes a repeat a no-op.
-    if (!st.online) st.online = new Set()
+    // Connection state is tracked in players.js, which understands both log shapes PZ has used
+    // and only reports genuine transitions — see the notes there.
+    if (!st.players) st.players = makePlayerState()
     for (const line of buf.toString('utf8').split('\n')) {
       if (!line.trim()) continue
+      const evt = applyPlayerLine(st.players, line)
+      if (evt) {
+        if (evt.type === 'join' && ev.playerJoin) pushoverFor(s, 'Player Joined', evt.name + ' joined the server')
+        if (evt.type === 'leave' && ev.playerLeave) pushoverFor(s, 'Player Left', evt.name + ' left the server')
+        continue
+      }
       let m
-      if ((m = line.match(/"([^"]+)" allowed to join/))) {
-        const who = m[1]
-        if (!st.online.has(who)) {
-          st.online.add(who)
-          if (ev.playerJoin) pushoverFor(s, 'Player Joined', who + ' joined the server')
-        }
-        continue
-      }
-      if ((m = line.match(/"([^"]+)" (?:disconnected player|removed connection)/))) {
-        const who = m[1]
-        if (st.online.delete(who) && ev.playerLeave) {
-          pushoverFor(s, 'Player Left', who + ' left the server')
-        }
-        continue
-      }
       if (ev.playerDied && (m = line.match(/user (\S+) died at/))) {
         pushoverFor(s, 'Player Died', m[1] + ' has died'); continue
       }
