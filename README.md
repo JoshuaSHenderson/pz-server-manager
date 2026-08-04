@@ -25,6 +25,40 @@ Built with Node.js + Express. Runs as a sidecar Docker container alongside the P
 | Player died | Parsed from PZ user log |
 | Player kicked | Parsed from PZ user log |
 
+## Screenshots
+
+Captured from a live server running 148 Workshop items / 183 loaded mods.
+
+### Dashboard — Server Alerts
+
+Mod issues, orphaned files, failed downloads, recent updates and notable errors from both log streams, gathered in one place.
+
+![Dashboard with Server Alerts](docs/screenshots/01-dashboard.png)
+
+### Dependency issues
+
+`require=`, `incompatible=` and `loadModAfter=` read from every installed `mod.info` and checked against `Mods=`. Nothing is auto-installed — authors list optional companions as required all the time, so each row asks.
+
+![Dependency issues panel](docs/screenshots/02-dependency-issues.png)
+
+### Load order
+
+Reorder `Mods=` directly. Moves are staged locally and written only on save, and the previous order is snapshotted automatically before every save.
+
+![Load order editor](docs/screenshots/04-load-order.png)
+
+### Installed mods
+
+Per-mod-id enable toggles, load position, Workshop type tags, and collection attribution. A Workshop item shipping several mod ids shows every position it occupies.
+
+![Installed mods table](docs/screenshots/05-installed-mods.png)
+
+### Logs
+
+The PZ server log and the manager's own log as separate streams, each with independent pause, clear and filter.
+
+![Logs tab](docs/screenshots/06-logs.png)
+
 ## Requirements
 
 - Docker with access to the host socket (`/var/run/docker.sock`)
