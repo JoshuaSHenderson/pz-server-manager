@@ -1153,7 +1153,7 @@ function switchTab(tab) {
   document.getElementById('tab-' + tab).classList.add('active')
   if (tab === 'logs') { startLog(); startManagerLog() }
   else { stopLog(); stopManagerLog() }
-  if (tab === 'mods') { fetchMods(); fetchCollections(); fetchDependencies(); fetchAudit(); startDownloadPoll() }
+  if (tab === 'mods') { fetchMods(); fetchCollections(); fetchDependencies(); fetchAudit(); renderModOrder(); startDownloadPoll() }
   if (tab === 'players') fetchPlayers()
   if (tab === 'settings') fetchNotifSettings()
   if (tab === 'config') { fetchConfig(); fetchSandbox() }
@@ -1440,6 +1440,9 @@ function modSortValue(m, key) {
   if (key === 'title') return (m.title || '').toLowerCase()
   if (key === 'workshopId') return m.workshopId
   if (key === 'modIds') return (m.modIds[0] || '').toLowerCase()
+  // Zero-padded so the existing string comparator sorts it numerically; '' for mods that aren't
+  // loaded, which sinks them to the bottom either way like every other blank.
+  if (key === 'order') return m.minOrder ? String(m.minOrder).padStart(6, '0') : ''
   // Sort by the first meaningful tag so mods of a type group together. Build/version tags are
   // dropped from the sort key — nearly every mod carries one, so they'd flatten the grouping.
   if (key === 'tags') return displayTags(m).join(', ').toLowerCase()
@@ -1533,11 +1536,15 @@ function renderModsTable(mods) {
     var detail = m.modIds.length
       ? m.modIds.map(function(id) {
           var on = enabledIds.indexOf(id) !== -1
+          // Each loaded id carries its own position, since one item can occupy several.
+          var pos = on ? (m.orderPositions || [])[enabledIds.indexOf(id)] : null
           return '<label style="display:flex;align-items:center;gap:.4rem;font-size:.75rem;cursor:pointer' +
-            (on ? '' : ';opacity:.5') + '" title="' + (on ? 'Loaded by the server' : 'Installed but not loaded') + '">' +
+            (on ? '' : ';opacity:.5') + '" title="' + (on ? 'Loaded by the server' + (pos ? ' at load position ' + pos : '') : 'Installed but not loaded') + '">' +
             '<input type="checkbox"' + (on ? ' checked' : '') +
             ' onchange="setModEnabled(this, decodeURIComponent(\'' + encodeURIComponent(id) + '\'))">' +
-            '<span class="mono">' + esc(id) + '</span></label>'
+            '<span class="mono">' + esc(id) + '</span>' +
+            (pos ? '<span class="mono" style="font-size:.65rem;color:var(--muted)">#' + pos + '</span>' : '') +
+            '</label>'
         }).join('')
       : '<span style="font-size:.75rem;color:var(--muted)">—</span>'
     var coll = (m.collections && m.collections.length)
@@ -1556,9 +1563,15 @@ function renderModsTable(mods) {
             'border-radius:3px;background:var(--bg);border:1px solid var(--border);color:var(--muted)">' + esc(t) + '</span>'
         }).join('')
       : '<span style="font-size:.72rem;color:var(--muted)">—</span>'
+    // Load order: blank when the item loads nothing, all positions listed when it loads several.
+    var order = (m.orderPositions && m.orderPositions.length)
+      ? '<span class="mono" style="font-size:.78rem">' + m.orderPositions.join(', ') + '</span>' +
+        '<div style="font-size:.65rem;color:var(--muted)">of ' + m.loadOrderTotal + '</div>'
+      : '<span style="font-size:.72rem;color:var(--muted)">—</span>'
     return '<tr>' +
       '<td><div>' + name + '</div>' +
         '<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + m.workshopId + '" target="_blank" class="mono" style="font-size:.72rem;opacity:.7">' + m.workshopId + '</a></td>' +
+      '<td style="white-space:nowrap">' + order + '</td>' +
       '<td>' + detail + '</td>' +
       '<td style="max-width:200px">' + tagHtml + '</td>' +
       '<td>' + coll + '</td>' +
@@ -1575,7 +1588,7 @@ function renderModsTable(mods) {
   }
   document.getElementById('mods-table').innerHTML =
     '<table><thead><tr>' +
-      th('title', 'Mod') + th('modIds', 'Mod IDs (tick = loaded)') + th('tags', 'Type') + th('collection', 'Collection') + th('status', 'Status') +
+      th('title', 'Mod') + th('order', 'Load order') + th('modIds', 'Mod IDs (tick = loaded)') + th('tags', 'Type') + th('collection', 'Collection') + th('status', 'Status') +
       '<th></th></tr></thead><tbody>' + rows + '</tbody></table>'
 }
 

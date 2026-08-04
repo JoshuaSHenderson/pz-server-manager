@@ -1521,7 +1521,12 @@ app.get('/api/mods', (req, res) => {
   // A Workshop item can ship several mod ids (Authentic Z packs Current/Lite/Backpacks+ into one),
   // and Mods= decides which of them the server actually loads. Report that per id so the UI can
   // toggle them individually instead of only offering to delete the whole item.
-  const enabledIds = new Set(getIniList(s, 'Mods'))
+  const modsList = getIniList(s, 'Mods')
+  const enabledIds = new Set(modsList)
+  // Position in Mods= is load order. A Workshop item can ship several mod ids, so an item can
+  // occupy several positions — report each, and the earliest for sorting.
+  const orderIndex = {}
+  modsList.forEach((id, i) => { orderIndex[id] = i })
 
   const base = workshopIds.map(wid => {
     const modIds = modIdsFromWorkshop(s, wid)
@@ -1529,9 +1534,15 @@ app.get('/api/mods', (req, res) => {
     const q = qById[wid]
     let status = 'ok'
     if (!modIds.length) status = (q && q.status === 'collection') ? 'collection' : 'missing'
+    const enabled = modIds.filter(id => enabledIds.has(id))
+    const positions = enabled.map(id => orderIndex[id])
     return {
       workshopId: wid, modIds, modFolders: folders, status,
-      enabledIds: modIds.filter(id => enabledIds.has(id)),
+      enabledIds: enabled,
+      // 1-based to match what the load-order editor shows.
+      orderPositions: positions.map(i => i + 1),
+      minOrder: positions.length ? Math.min.apply(null, positions) + 1 : null,
+      loadOrderTotal: modsList.length,
       error: (q && q.error) || null,
       collections: byMod[wid] || []
     }
