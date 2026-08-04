@@ -364,6 +364,11 @@ function readNotifConfig() {
 function writeNotifConfig(cfg) {
   fs.writeFileSync(NOTIF_PATH, JSON.stringify(cfg, null, 2))
 }
+// Operator-visible activity log. Anything this manager does that changes state gets a line, so
+// the Manager Logs pane answers "what did it just do?" without anyone reading the source.
+// Docker adds the timestamps (the log stream is requested with --timestamps), so none here.
+function logFor(s, msg) { console.log('[' + (s ? serverLabel(s) : 'manager') + '] ' + msg) }
+
 function pushover(title, message) {
   const cfg = readNotifConfig()
   if (!cfg.enabled || !cfg.token || !cfg.userKey) return
@@ -380,7 +385,10 @@ function pushover(title, message) {
 // container ("Build 41" for a container that now runs B42), so notifications used to carry a
 // stale hardcoded name. serverLabel() resolves the user's override, then the server's live
 // PublicName, and only falls back to s.name / the container name.
-function pushoverFor(s, title, message) { pushover('[' + serverLabel(s) + '] ' + title, message) }
+function pushoverFor(s, title, message) {
+  logFor(s, 'notify: ' + title + ' - ' + message)
+  pushover('[' + serverLabel(s) + '] ' + title, message)
+}
 
 // Workshop URLs for the collections this server tracks. Used in the Discord status so players can
 // subscribe to the whole mod list in one click instead of being handed a list of ids.
@@ -492,22 +500,49 @@ function updateDiscordStatus(cb) {
               const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000)
               uptime = h > 0 ? h + 'h ' + m + 'm' : m + 'm'
             }
-            let title = serverLabel(s), modCount = '—', port = ''
+            // Everything a player needs to decide whether to join and how, without asking:
+            // status, where to connect, how busy it is, the rules, and where to get the mods.
+            let title = serverLabel(s), modCount = '—', port = '', maxPlayers = '', pvp = '', pub = '', locked = false
             try {
               modCount = String(getIniList(s, 'WorkshopItems').length)
               port = getIniValue(s, 'DefaultPort', '')
+              maxPlayers = getIniValue(s, 'MaxPlayers', '')
+              pvp = getIniValue(s, 'PVP', '')
+              pub = getIniValue(s, 'Public', '')
+              locked = !!getIniValue(s, 'Password', '')
             } catch {}
             const players = isOnline ? onlinePlayersFor(s) : []
             const version = versions[s.id]
-            let value = (isOnline ? '🟢 **Online**' : '🔴 **Offline**') + ' · Uptime ' + uptime + ' · ' + modCount + ' mods'
-            if (version) value += ' · v' + version
-            if (externalIp && port) value += '\n🔌 `' + externalIp + ':' + port + '`'
-            value += '\n👥 ' + players.length + ' online' + (players.length ? ': ' + players.slice(0, 15).join(', ') + (players.length > 15 ? ', …' : '') : '')
+
+            const lines = []
+            lines.push((isOnline ? '🟢 **Online**' : '🔴 **Offline**') +
+              (version ? ' · `v' + version + '`' : '') +
+              (isOnline ? ' · up ' + uptime : ''))
+
+            if (port) {
+              // The public address is what someone outside the LAN needs; the LAN one is what
+              // people in the house actually use, and they are rarely the same.
+              const addrs = []
+              if (externalIp) addrs.push('`' + externalIp + ':' + port + '`')
+              if (s.connect) addrs.push('LAN `' + s.connect + '`')
+              if (addrs.length) lines.push('🔌 ' + addrs.join('  ·  '))
+            }
+
+            lines.push('👥 **' + players.length + (maxPlayers ? '/' + maxPlayers : '') + '** online' +
+              (players.length ? ' — ' + players.slice(0, 15).join(', ') + (players.length > 15 ? ', …' : '') : ''))
+
+            const rules = []
+            if (pvp) rules.push(pvp === 'true' ? '⚔️ PVP on' : '🕊️ PVP off')
+            rules.push(locked ? '🔒 Password' : '🔓 Open')
+            if (pub) rules.push(pub === 'true' ? '📡 Public listing' : '📕 Unlisted')
+            if (rules.length) lines.push(rules.join('  ·  '))
+
             // Tracked collections, so people can subscribe to the server's mod list from Discord
             // rather than being sent a list of Workshop ids.
             const collLinks = collectionLinks(s)
-            if (collLinks) value += '\n🧩 ' + collLinks
-            fields.push({ name: title, value, inline: false })
+            lines.push('🧩 **' + modCount + ' mods**' + (collLinks ? ' — ' + collLinks : ''))
+
+            fields.push({ name: title, value: lines.join('\n'), inline: false })
           }
           body = { embeds: [{ title: 'Project Zomboid Servers', color: anyOnline ? 5763719 : 15548997, fields, timestamp: new Date().toISOString() }] }
         } else {
@@ -516,8 +551,18 @@ function updateDiscordStatus(cb) {
             const n = isOnline ? onlinePlayersFor(s).length : 0
             const version = versions[s.id]
             const coll = collectionUrls(s)[0]
-            return serverLabel(s) + (version ? ' v' + version : '') + ' ' + (isOnline ? '🟢 ' + n + ' online' : '🔴') +
-              (coll ? ' · mods: ' + coll : '')
+            let port = '', maxPlayers = '', modCount = ''
+            try {
+              port = getIniValue(s, 'DefaultPort', '')
+              maxPlayers = getIniValue(s, 'MaxPlayers', '')
+              modCount = String(getIniList(s, 'WorkshopItems').length)
+            } catch {}
+            const bits = [serverLabel(s) + (version ? ' v' + version : '')]
+            bits.push(isOnline ? '🟢 ' + n + (maxPlayers ? '/' + maxPlayers : '') + ' online' : '🔴 offline')
+            if (externalIp && port) bits.push(externalIp + ':' + port)
+            if (modCount) bits.push(modCount + ' mods')
+            if (coll) bits.push('mods: ' + coll)
+            return bits.join(' · ')
           }).join(' | ')
           const template = cfg.discord.template || 'Project Zomboid Server: <ZomboidServerStats>'
           const content = template
@@ -1048,6 +1093,7 @@ app.get('/api/status', (req, res) => {
 
 app.post('/api/server/start', (req, res) => {
   const s = srv(req)
+  logFor(s, 'start requested via UI')
   markAwaitingReady(s)
   exec('docker start ' + s.container, { timeout: 30000 }, (err) => {
     const ok = !err
@@ -1061,6 +1107,7 @@ app.post('/api/server/start', (req, res) => {
 
 app.post('/api/server/stop', (req, res) => {
   const s = srv(req)
+  logFor(s, 'stop requested via UI')
   mstate(s).intentionalStop = true
   exec('docker stop ' + s.container, { timeout: 60000 }, (err) => {
     const ok = !err
@@ -1074,6 +1121,7 @@ app.post('/api/server/stop', (req, res) => {
 
 app.post('/api/server/restart', (req, res) => {
   const s = srv(req)
+  logFor(s, 'restart requested via UI')
   mstate(s).intentionalStop = true
   markAwaitingReady(s)
   exec('docker restart ' + s.container, { timeout: 60000 }, (err) => {
@@ -1437,6 +1485,7 @@ function steamcmdDownload(s, workshopIds, source, collectionId) {
   queueAdd(s, workshopIds, source, collectionId)
   const items = workshopIds.map(id => '+workshop_download_item 108600 ' + id).join(' ')
   const cmd = 'docker exec -d ' + s.container + ' /home/steam/steamcmd/steamcmd.sh +force_install_dir /home/steam/pz-dedicated +login anonymous ' + items + ' +quit'
+  logFor(s, 'SteamCMD: downloading ' + workshopIds.length + ' item(s) [' + workshopIds.slice(0, 8).join(', ') + (workshopIds.length > 8 ? ', ...' : '') + '] source=' + source)
   exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
     if (err) {
       console.error('[download] failed to start for ' + s.name + ':', stderr || err.message)
@@ -1554,6 +1603,7 @@ function reconcileDownloads(s) {
         try {
           const r = registerInstalledMod(s, entry.id)
           if (r.status === 'installed') {
+            logFor(s, 'installed ' + entry.id + ' - mod ids [' + r.modIds.join(', ') + ']')
             entry.status = 'installed'
             entry.modIds = r.modIds
             entry.copiedFolders = r.copiedFolders
@@ -1561,6 +1611,7 @@ function reconcileDownloads(s) {
           } else {
             entry.status = 'failed'
             entry.error = explainDownloadFailure(s, entry.id, (out || '').split('\n'))
+            logFor(s, 'download FAILED for ' + entry.id + ' - ' + entry.error)
           }
         } catch (e) {
           entry.status = 'failed'
@@ -1707,6 +1758,7 @@ app.post('/api/mods/enabled', (req, res) => {
   if (!known.has(modId)) return res.status(400).json({ error: 'Unknown mod id: ' + modId })
   const rest = getIniList(s, 'Mods').filter(id => id !== modId)
   setIniList(s, 'Mods', enabled ? [...rest, modId] : rest)
+  logFor(s, (enabled ? 'enabled' : 'disabled') + ' mod "' + modId + '" (' + (enabled ? rest.length + 1 : rest.length) + ' loaded)')
   res.json({ success: true, modId, enabled })
 })
 
@@ -1729,6 +1781,7 @@ app.delete('/api/mods/:workshopId', (req, res) => {
   const s = srv(req)
   const { workshopId } = req.params
   const { removedIds, removedFolders } = removeWorkshopItem(s, workshopId)
+  logFor(s, 'removed Workshop item ' + workshopId + ' - mod ids [' + removedIds.join(', ') + '], folders [' + removedFolders.join(', ') + ']')
   writeQueue(s, readQueue(s).filter(e => e.id !== workshopId))
   res.json({ success: true, workshopId, removedIds, removedFolders })
 })
@@ -1804,6 +1857,7 @@ app.put('/api/mods/order', (req, res) => {
   if (!check.ok) return res.status(400).json({ error: check.error })
   const backup = backupModOrder(s, (req.body || {}).label || 'before reorder')
   setIniList(s, 'Mods', next)
+  logFor(s, 'load order saved (' + next.length + ' mods), previous backed up as ' + backup)
   res.json({ success: true, count: next.length, backup })
 })
 
@@ -1823,6 +1877,7 @@ app.post('/api/mods/order/restore', (req, res) => {
   if (!check.ok) return res.status(409).json({ error: 'Backup no longer matches the enabled mods — ' + check.error })
   const backup = backupModOrder(s, 'before restoring ' + file)
   setIniList(s, 'Mods', saved.mods)
+  logFor(s, 'load order restored from ' + file + ' (' + saved.mods.length + ' mods)')
   res.json({ success: true, restored: file, count: saved.mods.length, backup })
 })
 
@@ -1913,6 +1968,7 @@ app.delete('/api/audit/orphan', (req, res) => {
   const bytes = dirSizeBytes(target)
   try { execSync('rm -rf ' + JSON.stringify(target)) }
   catch (e) { return res.status(500).json({ error: 'Delete failed: ' + e.message }) }
+  logFor(s, 'deleted orphaned ' + kind + ' "' + id + '" - freed ' + humanBytes(bytes))
   res.json({ success: true, kind, id, freed: humanBytes(bytes) })
 })
 
@@ -1936,6 +1992,7 @@ app.delete('/api/audit/orphans', (req, res) => {
     try { execSync('rm -rf ' + JSON.stringify(t.path)); deleted.push({ kind: t.kind, id: t.id }); freed += t.bytes }
     catch (e) { failed.push({ kind: t.kind, id: t.id, error: e.message }) }
   }
+  logFor(s, 'bulk orphan delete: removed ' + deleted.length + ' item(s), freed ' + humanBytes(freed) + (failed.length ? ', ' + failed.length + ' failed' : ''))
   res.json({ success: true, deleted: deleted.length, failed, freed: humanBytes(freed), freedBytes: freed })
 })
 
@@ -2000,6 +2057,7 @@ app.post('/api/dependencies/ignore', (req, res) => {
   const list = readDepIgnores(s).filter(k => k.toLowerCase() !== key.toLowerCase())
   if (ignored) list.push(key)
   writeDepIgnores(s, list)
+  logFor(s, (ignored ? 'ignoring' : 'restored') + ' dependency ' + key)
   res.json({ success: true, key, ignored })
 })
 
@@ -2331,6 +2389,8 @@ function installCollection(s, collectionId, opts, cb) {
         for (const wid of pruned) removeWorkshopItem(s, wid)
         if (pruned.length) writeQueue(s, readQueue(s).filter(e => !pruned.includes(e.id)))
       }
+      if (pruned.length) logFor(s, 'collection ' + collectionId + ': pruned ' + pruned.length + ' dropped mod(s) [' + pruned.join(', ') + ']')
+      logFor(s, 'collection ' + collectionId + ' synced: ' + leaves.length + ' item(s), ' + todo.length + ' to download')
       if (todo.length) steamcmdDownload(s, todo, 'collection', collectionId)
       cb(null, {
         total: leaves.length, queued: todo.length, nested: (nested || []).length,
@@ -2487,9 +2547,11 @@ app.get('/api/config', (req, res) => {
 app.put('/api/config', (req, res) => {
   const s = srv(req)
   const updates = req.body || {}
+  const changed = []
   for (const [k, v] of Object.entries(updates)) {
-    if (INI_KEY_RE.test(k) && typeof v === 'string') setIniValue(s, k, v)
+    if (INI_KEY_RE.test(k) && typeof v === 'string') { setIniValue(s, k, v); changed.push(k) }
   }
+  if (changed.length) logFor(s, 'server config updated: ' + changed.join(', '))
   res.json({ success: true })
 })
 
@@ -3024,7 +3086,27 @@ app.get('/api/players/online', (req, res) => {
 // rather than printing a bare port that doesn't match the URL people actually use.
 // Servers are listed as id + resolved label, because an id is just a slug the user can rename and
 // on its own it says nothing about which server it refers to.
-app.listen(7777, () => console.log(
-  'PZ Server Manager listening on container port 7777 (published to the host by docker-compose) — servers: ' +
-  (allServers().map(s => s.id + ' "' + serverLabel(s) + '"').join(', ') || 'none found')
-))
+app.listen(7777, () => {
+  console.log(
+    'PZ Server Manager listening on container port 7777 (published to the host by docker-compose) — servers: ' +
+    (allServers().map(s => s.id + ' "' + serverLabel(s) + '"').join(', ') || 'none found')
+  )
+  // A startup summary, so the Manager Logs pane opens with the state it is working from rather
+  // than a bare "listening" line and then silence until something happens.
+  for (const s of allServers()) {
+    try {
+      logFor(s, 'container=' + s.container + ' data=' + s.data + ' workshop=' + s.workshop + ' state=' + (s.state || 'unknown'))
+      logFor(s, getIniList(s, 'WorkshopItems').length + ' Workshop item(s) registered, ' +
+        getIniList(s, 'Mods').length + ' mod(s) in load order')
+      const au = readAutoUpdate(s)
+      logFor(s, 'mod auto-update ' + (au.enabled ? 'ON (hourly, restart-when-empty ' + (au.restartWhenEmpty ? 'on' : 'off') + ')' : 'off'))
+      const as = readAutoSync(s)
+      logFor(s, 'collection auto-sync ' + (as.enabled ? 'ON every ' + as.intervalHours + 'h' : 'off') +
+        ' · ' + readCollections(s).length + ' collection(s) tracked')
+    } catch (e) { logFor(s, 'startup summary unavailable: ' + e.message) }
+  }
+  const n = readNotifConfig()
+  logFor(null, 'notifications ' + (n.enabled ? 'ON' : 'off') +
+    ' · Discord status ' + ((n.discord && n.discord.enabled) ? 'ON' : 'off'))
+  logFor(null, 'monitors: crash 60s · ready 20s · downloads 15s · user log 10s · auto-update 5m · Discord 5m')
+})
