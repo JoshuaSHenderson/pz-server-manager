@@ -542,6 +542,9 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
   <div id="tab-dashboard" class="tab-pane active">
     <div class="pane-head"><h1>Dashboard</h1><p>Server status, control, and restart scheduling</p></div>
     <div id="dash-msg"></div>
+    <!-- Aggregated health: mod issues, orphaned files, failed downloads, recent updates and
+         notable errors from both log streams. Hidden entirely when there is nothing to say. -->
+    <div id="dash-alerts"></div>
     <div class="card">
       <div class="card-title">Server Control</div>
       <div class="stat-grid">
@@ -636,7 +639,9 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
 
     <!-- Add content -->
     <div class="card">
-      <div class="card-title">Add Content</div>
+      <details id="addcontent-details" open ontoggle="panelOpen.add = this.open">
+      <summary style="cursor:pointer"><span class="card-title" style="margin-bottom:0">Add Content</span></summary>
+      <div style="margin-top:.9rem"></div>
       <div class="row" style="margin-bottom:.6rem">
         <input type="text" id="workshop-input" placeholder="Workshop mod ID or URL">
         <button class="btn-primary" id="install-btn" onclick="installMod()">Add Mod</button>
@@ -646,12 +651,16 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <button class="btn-primary" id="install-collection-btn" onclick="addCollection()">Add Collection</button>
       </div>
       <p style="margin-top:.6rem;font-size:.78rem;color:var(--muted)">Paste an ID or a full <span class="mono">steamcommunity.com/sharedfiles/filedetails/?id=…</span> URL. Collections are tracked below and expand nested collections automatically.</p>
+      </details>
     </div>
 
     <!-- Tracked collections -->
     <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;gap:1rem;flex-wrap:wrap">
-        <div class="card-title" style="margin-bottom:0">Collections</div>
+      <details id="collections-details" open ontoggle="panelOpen.collections = this.open">
+      <summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+        <span class="card-title" style="margin-bottom:0">Collections</span>
+      </summary>
+      <div style="display:flex;align-items:center;justify-content:flex-end;margin:.9rem 0;gap:1rem;flex-wrap:wrap">
         <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
           <label style="display:flex;align-items:center;gap:.45rem;cursor:pointer;font-size:.8rem;color:var(--muted)">
             <input type="checkbox" id="autosync-enabled" onchange="saveAutoSync()"> Auto-sync every
@@ -667,22 +676,33 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         </div>
       </div>
       <div id="collections-table"></div>
+      </details>
     </div>
 
     <!-- Installed mods -->
+    <!-- Each of these renders its own collapsible card, so they are siblings rather than nested
+         inside Installed Mods. -->
+    <div id="mods-deps"></div>
+    <div id="mods-audit"></div>
+    <div id="mods-order"></div>
+
     <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;gap:1rem;flex-wrap:wrap">
-        <div class="card-title" style="margin-bottom:0">Installed Mods</div>
-        <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap">
+      <details id="installed-details" open ontoggle="panelOpen.installed = this.open">
+        <summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+          <span class="card-title" style="margin-bottom:0">Installed Mods</span>
+          <span id="mod-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap"></span>
+        </summary>
+        <!-- Filter controls live in the body, not the summary: a form control inside a summary
+             element toggles the panel when clicked. -->
+        <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap;margin:.9rem 0">
           <input type="text" id="mod-filter" placeholder="Filter by name, ID, tag, collection..." oninput="renderModsTable(cachedMods)" style="width:220px;padding:.35rem .55rem;font-size:.82rem">
           <select id="mod-type" class="server-select" style="width:auto;margin:0;padding:.35rem .5rem;font-size:.82rem" onchange="renderModsTable(cachedMods)" title="Filter by Workshop tag">
             <option value="">All types</option>
           </select>
-          <span id="mod-count" class="text-muted" style="font-size:.8rem;font-family:var(--font-mono);white-space:nowrap"></span>
         </div>
-      </div>
-      <div id="mods-problems"></div>
-      <div id="mods-table"></div>
+        <div id="mods-problems"></div>
+        <div id="mods-table"></div>
+      </details>
     </div>
 
     <!-- Recent download activity (collapsed by default — no longer in the way) -->
@@ -898,6 +918,27 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       </p>
       <div id="servers-admin"></div>
     </div>
+    <div class="card">
+      <details id="autoupdate-details" open>
+      <summary style="cursor:pointer"><span class="card-title" style="margin-bottom:0">Mod Auto-Update</span></summary>
+      <p style="font-size:.78rem;color:var(--muted);margin:.9rem 0">
+        Checks Steam every hour for updates to installed Workshop items. Updated mods are downloaded, and
+        once the downloads finish the server is restarted to apply them — but only while nobody is connected.
+        If players are online it keeps waiting and retries every few minutes.
+      </p>
+      <div style="display:grid;gap:.7rem;margin-bottom:1rem">
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="autoupdate-enabled" onchange="saveAutoUpdate()"> Check hourly for mod updates
+        </label>
+        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
+          <input type="checkbox" id="autoupdate-restart" onchange="saveAutoUpdate()"> Restart automatically once downloads finish and the server is empty
+        </label>
+      </div>
+      <div id="autoupdate-status" style="font-size:.78rem;color:var(--muted);margin-bottom:.8rem"></div>
+      <button class="btn-secondary btn-sm" onclick="runAutoUpdateNow()">Check now</button>
+      </details>
+    </div>
+
     <div class="card">
       <div class="card-title">Pushover Notifications</div>
       <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem">
@@ -1147,9 +1188,9 @@ function switchTab(tab) {
   document.getElementById('tab-' + tab).classList.add('active')
   if (tab === 'logs') { startLog(); startManagerLog() }
   else { stopLog(); stopManagerLog() }
-  if (tab === 'mods') { fetchMods(); fetchCollections(); startDownloadPoll() }
+  if (tab === 'mods') { fetchMods(); fetchCollections(); fetchDependencies(); fetchAudit(); renderModOrder(); startDownloadPoll() }
   if (tab === 'players') fetchPlayers()
-  if (tab === 'settings') fetchNotifSettings()
+  if (tab === 'settings') { fetchNotifSettings(); fetchAutoUpdate() }
   if (tab === 'config') { fetchConfig(); fetchSandbox() }
   if (tab === 'backups') fetchBackups()
   if (tab === 'dashboard') fetchSchedule()
@@ -1434,6 +1475,9 @@ function modSortValue(m, key) {
   if (key === 'title') return (m.title || '').toLowerCase()
   if (key === 'workshopId') return m.workshopId
   if (key === 'modIds') return (m.modIds[0] || '').toLowerCase()
+  // Zero-padded so the existing string comparator sorts it numerically; '' for mods that aren't
+  // loaded, which sinks them to the bottom either way like every other blank.
+  if (key === 'order') return m.minOrder ? String(m.minOrder).padStart(6, '0') : ''
   // Sort by the first meaningful tag so mods of a type group together. Build/version tags are
   // dropped from the sort key — nearly every mod carries one, so they'd flatten the grouping.
   if (key === 'tags') return displayTags(m).join(', ').toLowerCase()
@@ -1527,11 +1571,15 @@ function renderModsTable(mods) {
     var detail = m.modIds.length
       ? m.modIds.map(function(id) {
           var on = enabledIds.indexOf(id) !== -1
+          // Each loaded id carries its own position, since one item can occupy several.
+          var pos = on ? (m.orderPositions || [])[enabledIds.indexOf(id)] : null
           return '<label style="display:flex;align-items:center;gap:.4rem;font-size:.75rem;cursor:pointer' +
-            (on ? '' : ';opacity:.5') + '" title="' + (on ? 'Loaded by the server' : 'Installed but not loaded') + '">' +
+            (on ? '' : ';opacity:.5') + '" title="' + (on ? 'Loaded by the server' + (pos ? ' at load position ' + pos : '') : 'Installed but not loaded') + '">' +
             '<input type="checkbox"' + (on ? ' checked' : '') +
             ' onchange="setModEnabled(this, decodeURIComponent(\'' + encodeURIComponent(id) + '\'))">' +
-            '<span class="mono">' + esc(id) + '</span></label>'
+            '<span class="mono">' + esc(id) + '</span>' +
+            (pos ? '<span class="mono" style="font-size:.65rem;color:var(--muted)">#' + pos + '</span>' : '') +
+            '</label>'
         }).join('')
       : '<span style="font-size:.75rem;color:var(--muted)">—</span>'
     var coll = (m.collections && m.collections.length)
@@ -1550,9 +1598,15 @@ function renderModsTable(mods) {
             'border-radius:3px;background:var(--bg);border:1px solid var(--border);color:var(--muted)">' + esc(t) + '</span>'
         }).join('')
       : '<span style="font-size:.72rem;color:var(--muted)">—</span>'
+    // Load order: blank when the item loads nothing, all positions listed when it loads several.
+    var order = (m.orderPositions && m.orderPositions.length)
+      ? '<span class="mono" style="font-size:.78rem">' + m.orderPositions.join(', ') + '</span>' +
+        '<div style="font-size:.65rem;color:var(--muted)">of ' + m.loadOrderTotal + '</div>'
+      : '<span style="font-size:.72rem;color:var(--muted)">—</span>'
     return '<tr>' +
       '<td><div>' + name + '</div>' +
         '<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + m.workshopId + '" target="_blank" class="mono" style="font-size:.72rem;opacity:.7">' + m.workshopId + '</a></td>' +
+      '<td style="white-space:nowrap">' + order + '</td>' +
       '<td>' + detail + '</td>' +
       '<td style="max-width:200px">' + tagHtml + '</td>' +
       '<td>' + coll + '</td>' +
@@ -1569,7 +1623,7 @@ function renderModsTable(mods) {
   }
   document.getElementById('mods-table').innerHTML =
     '<table><thead><tr>' +
-      th('title', 'Mod') + th('modIds', 'Mod IDs (tick = loaded)') + th('tags', 'Type') + th('collection', 'Collection') + th('status', 'Status') +
+      th('title', 'Mod') + th('order', 'Load order') + th('modIds', 'Mod IDs (tick = loaded)') + th('tags', 'Type') + th('collection', 'Collection') + th('status', 'Status') +
       '<th></th></tr></thead><tbody>' + rows + '</tbody></table>'
 }
 
@@ -1600,12 +1654,507 @@ function setModEnabled(cb, modId) {
         label.title = want ? 'Loaded by the server' : 'Installed but not loaded'
       }
       showMsg('mods-msg', (want ? 'Enabled ' : 'Disabled ') + modId + '. Restart the server to apply.', 'success', 6000)
+      fetchDependencies() // enabling/disabling a mod can create or resolve a dependency issue
     })
     .catch(function(e) {
       cb.checked = !want // the ini never changed, so put the box back
       showMsg('mods-msg', 'Could not update ' + modId + ': ' + e.message, 'error', 0)
     })
     .finally(function() { cb.disabled = false })
+}
+
+// --- Load order ---
+// Mods= is load order: later entries win, and loadModAfter= mods expect to sit behind their
+// dependencies. Edits are staged locally and only written when Save is pressed, so a mis-drag
+// costs nothing until then.
+var orderState = { mods: [], original: [], backups: [] }
+
+function fetchModOrder() {
+  fetch('/api/mods/order').then(function(r) { return r.json() }).then(function(d) {
+    orderState.mods = (d.mods || []).map(function(m) { return m })
+    orderState.original = orderState.mods.map(function(m) { return m.modId })
+    orderState.backups = d.backups || []
+    renderModOrder()
+  }).catch(function() {})
+}
+
+function orderDirty() {
+  return orderState.mods.map(function(m) { return m.modId }).join(' ') !== orderState.original.join(' ')
+}
+
+function renderModOrder() {
+  var el = document.getElementById('mods-order')
+  if (!el) return
+  if (!orderState.mods.length) { fetchModOrder(); return }
+
+  var rows = orderState.mods.map(function(m, i) { return orderRowHtml(m, i) }).join('')
+  var backups = orderState.backups.length
+    ? '<div style="margin-top:.8rem;font-size:.76rem;color:var(--muted)">' +
+      '<strong>Backups</strong> (a snapshot is taken automatically before every save)' +
+      orderState.backups.slice(0, 8).map(function(b) {
+        return '<div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.25rem 0">' +
+          '<span class="mono">' + esc(b.file) + ' <span style="opacity:.7">' + (b.label ? esc(b.label) + ' · ' : '') + b.count + ' mods</span></span>' +
+          '<button class="btn-secondary btn-sm" onclick="restoreModOrder(decodeURIComponent(\'' + encodeURIComponent(b.file) + '\'))">Restore</button>' +
+          '</div>'
+      }).join('') + '</div>'
+    : '<div style="margin-top:.8rem;font-size:.76rem;color:var(--muted)">No backups yet — one is taken automatically before each save.</div>'
+
+  el.innerHTML = '<div class="card">' +
+    '<details' + (panelOpen.order ? ' open' : '') + ' ontoggle="panelOpen.order = this.open">' +
+    '<summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">' +
+      '<span class="card-title" style="margin-bottom:0">Load order <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + orderState.mods.length + ')</span></span>' +
+      '<span style="font-size:.75rem;color:var(--muted)">Later entries win when two mods change the same thing</span>' +
+    '</summary>' +
+    '<div style="display:flex;gap:.4rem;flex-wrap:wrap;margin:.9rem 0 .6rem">' +
+      '<button class="btn-primary btn-sm" id="order-save" onclick="saveModOrder()" disabled>Save order</button>' +
+      '<button class="btn-secondary btn-sm" id="order-discard" onclick="fetchModOrder()" disabled>Discard changes</button>' +
+    '</div>' +
+    '<div id="order-dirty" class="msg msg-info" style="display:none;margin-bottom:.6rem;font-size:.8rem">Unsaved changes — nothing is written until you press Save order.</div>' +
+    '<div id="order-list" style="max-height:420px;overflow-y:auto;border:1px solid var(--border);border-radius:3px">' + rows + '</div>' +
+    backups + '</details></div>'
+  refreshOrderMeta()
+}
+
+function orderRowHtml(m, i) {
+  // A mod that must load after another is flagged inline, so the constraint is visible while moving things.
+  var after = (m.loadModAfter || []).length
+    ? '<span style="font-size:.68rem;color:#60a5fa"> after: ' + esc(m.loadModAfter.join(', ')) + '</span>' : ''
+  var arg = "'" + encodeURIComponent(m.modId) + "'"
+  return '<div class="order-row" style="display:flex;align-items:center;gap:.5rem;padding:.25rem .5rem;border-bottom:1px solid var(--border)">' +
+    '<span class="ord-num mono" style="font-size:.7rem;color:var(--muted);width:2.6rem;text-align:right">' + (i + 1) + '</span>' +
+    '<span style="flex:1;font-size:.8rem;min-width:0;word-break:break-word">' + esc(m.modId) +
+      (m.installed ? '' : ' <span style="color:#e74c3c;font-size:.68rem">(not installed)</span>') + after + '</span>' +
+    '<button class="btn-secondary btn-sm ord-up" title="Move up" onclick="moveOrderBy(this, decodeURIComponent(' + arg + '), -1)">&#9650;</button>' +
+    '<button class="btn-secondary btn-sm ord-down" title="Move down" onclick="moveOrderBy(this, decodeURIComponent(' + arg + '), 1)">&#9660;</button>' +
+    '<button class="btn-secondary btn-sm" title="Move to top" onclick="moveOrderEdge(this, decodeURIComponent(' + arg + '), \'top\')">Top</button>' +
+    '<button class="btn-secondary btn-sm" title="Move to bottom" onclick="moveOrderEdge(this, decodeURIComponent(' + arg + '), \'bottom\')">Bottom</button>' +
+    '</div>'
+}
+
+// Moves reorder the existing DOM nodes instead of re-rendering the list. Rebuilding it would
+// reset the scroll position and blow away focus, so a second click on the same row would land
+// somewhere else entirely. Row identity is the mod id, not an index, so no handler needs rebinding.
+function applyOrderMove(btn, modId, to) {
+  var ids = orderState.mods.map(function(m) { return m.modId })
+  var from = ids.indexOf(modId)
+  if (from === -1) return
+  var last = orderState.mods.length - 1
+  var target = Math.max(0, Math.min(last, to))
+  if (target === from) return
+
+  var item = orderState.mods.splice(from, 1)[0]
+  orderState.mods.splice(target, 0, item)
+
+  var list = document.getElementById('order-list')
+  if (list) {
+    var node = list.children[from]
+    list.removeChild(node)
+    // After the removal every later index shifts down one, so children[target] is exactly the
+    // element the node must sit in front of — and undefined (append) when it belongs last.
+    list.insertBefore(node, list.children[target] || null)
+    // Keep the row visible when it is pushed past the edge of the scroll area.
+    if (node.scrollIntoView) node.scrollIntoView({ block: 'nearest' })
+  }
+  refreshOrderMeta()
+  if (btn && btn.focus) btn.focus()
+}
+
+function moveOrderBy(btn, modId, delta) {
+  var from = orderState.mods.map(function(m) { return m.modId }).indexOf(modId)
+  if (from === -1) return
+  applyOrderMove(btn, modId, from + delta)
+}
+
+function moveOrderEdge(btn, modId, where) {
+  applyOrderMove(btn, modId, where === 'top' ? 0 : orderState.mods.length - 1)
+}
+
+// Renumbers rows and syncs the Save/Discard state after an in-place move.
+function refreshOrderMeta() {
+  var list = document.getElementById('order-list')
+  if (list) {
+    var kids = list.children
+    for (var i = 0; i < kids.length; i++) {
+      var num = kids[i].querySelector('.ord-num')
+      if (num) num.textContent = i + 1
+      var up = kids[i].querySelector('.ord-up'), down = kids[i].querySelector('.ord-down')
+      if (up) up.disabled = (i === 0)
+      if (down) down.disabled = (i === kids.length - 1)
+    }
+  }
+  var dirty = orderDirty()
+  var save = document.getElementById('order-save')
+  var discard = document.getElementById('order-discard')
+  var banner = document.getElementById('order-dirty')
+  if (save) save.disabled = !dirty
+  if (discard) discard.disabled = !dirty
+  if (banner) banner.style.display = dirty ? '' : 'none'
+}
+
+function saveModOrder() {
+  var mods = orderState.mods.map(function(m) { return m.modId })
+  if (!confirm('Save this load order?\n\n' + mods.length + ' mods. The current order is backed up first, and the server must be restarted to apply.')) return
+  fetch('/api/mods/order', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mods: mods, label: 'manual reorder' }) })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok || !x.d.success) throw new Error(x.d.error || 'save failed')
+      showMsg('mods-msg', 'Load order saved (' + x.d.count + ' mods). Previous order backed up as ' + x.d.backup + '. Restart to apply.', 'success', 9000)
+      fetchModOrder(); fetchMods(); fetchDependencies()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not save order: ' + e.message, 'error', 0) })
+}
+
+function restoreModOrder(file) {
+  if (!confirm('Restore load order from ' + file + '?\n\nThe current order is backed up first. Restart the server to apply.')) return
+  fetch('/api/mods/order/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file: file }) })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok || !x.d.success) throw new Error(x.d.error || 'restore failed')
+      showMsg('mods-msg', 'Restored ' + file + ' (' + x.d.count + ' mods). Restart to apply.', 'success', 9000)
+      fetchModOrder(); fetchMods(); fetchDependencies()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not restore: ' + e.message, 'error', 0) })
+}
+
+// --- Disk audit ---
+// What is actually on disk versus what the ini claims. Half-removed mods leave files behind that
+// nothing else surfaces, and they cost real disk.
+var cachedAudit = null
+
+function fetchAudit() {
+  fetch('/api/audit').then(function(r) { return r.json() }).then(function(d) {
+    cachedAudit = d
+    renderAudit()
+  }).catch(function() {})
+}
+
+function renderAudit() {
+  var el = document.getElementById('mods-audit')
+  if (!el || !cachedAudit) return
+  var d = cachedAudit
+  var problems = (d.unregistered || []).length + (d.orphanFolders || []).length +
+                 (d.missingContent || []).length + (d.phantomEnabled || []).length
+  if (!problems) {
+    el.innerHTML = '<div class="msg msg-info" style="margin-bottom:1rem;font-size:.8rem">' +
+      'Mod files match the config — ' + d.registered + ' registered, ' + d.enabled + ' loaded, ' + d.onDisk + ' on disk. ' +
+      d.freeHuman + ' free.</div>'
+    return
+  }
+  function section(title, items, render) {
+    if (!items.length) return ''
+    return '<div style="margin-bottom:.7rem"><div style="font-size:.72rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:.3rem">' +
+      title + ' (' + items.length + ')</div>' + items.map(render).join('') + '</div>'
+  }
+  var row = function(label, note, btn) {
+    return '<div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.3rem .5rem;background:var(--bg);margin-bottom:.2rem;border-radius:3px">' +
+      '<span style="font-size:.79rem;min-width:0;word-break:break-word">' + label +
+      (note ? ' <span style="color:var(--muted);font-size:.72rem">' + note + '</span>' : '') + '</span>' + (btn || '') + '</div>'
+  }
+  var mb = function(b) { return b > 1073741824 ? (b / 1073741824).toFixed(1) + ' GB' : Math.round(b / 1048576) + ' MB' }
+
+  // Deleting everything at once is the point of this panel for most people, but it is the most
+  // destructive button in the UI — so it states the count and size up front and confirms twice.
+  var orphanCount = (d.unregistered || []).length + (d.orphanFolders || []).length
+  var deleteAll = orphanCount
+    ? '<button class="btn-danger btn-sm" style="margin-left:.4rem" onclick="deleteAllOrphans()">Delete all (' + orphanCount + ' · ' + d.reclaimableHuman + ')</button>'
+    : ''
+
+  el.innerHTML = '<div class="card" style="margin-bottom:1rem;border-left:3px solid #f5a623">' +
+    '<details' + (panelOpen.audit ? ' open' : '') + ' ontoggle="panelOpen.audit = this.open">' +
+    '<summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">' +
+      '<span class="card-title" style="margin-bottom:0">Orphaned Mod Folders <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + orphanCount + ')</span></span>' +
+      '<span style="font-size:.75rem;color:var(--muted)">' + d.registered + ' registered · ' + d.enabled + ' loaded · ' + d.onDisk + ' on disk · ' +
+      '<strong>' + d.reclaimableHuman + ' reclaimable</strong> · ' + d.freeHuman + ' free' +
+      ' <button class="btn-secondary btn-sm" style="margin-left:.4rem" onclick="event.preventDefault();fetchAudit()">Rescan</button>' + deleteAll + '</span>' +
+    '</summary>' +
+    section('Registered but no files on disk — the server cannot load these', d.missingContent || [], function(id) {
+      return row('<span class="mono">' + esc(id) + '</span>', 'in WorkshopItems, nothing downloaded',
+        '<button class="btn-secondary btn-sm" onclick="retryDownload(\'' + esc(id) + '\')">Re-download</button>')
+    }) +
+    section('Enabled but not provided by any installed mod', d.phantomEnabled || [], function(id) {
+      return row('<span class="mono">' + esc(id) + '</span>', 'in Mods= but no mod.info declares it',
+        '<button class="btn-secondary btn-sm" onclick="depDisable(decodeURIComponent(\'' + encodeURIComponent(id) + '\'))">Remove from Mods=</button>')
+    }) +
+    section('Downloaded but not registered — wasted disk', d.unregistered || [], function(u) {
+      return row('<span class="mono">' + esc(u.workshopId) + '</span>',
+        (u.folders || []).slice(0, 2).join(', ') + ' · ' + mb(u.bytes),
+        '<button class="btn-danger btn-sm" onclick="deleteOrphan(\'workshop\', decodeURIComponent(\'' + encodeURIComponent(u.workshopId) + '\'))">Delete</button>')
+    }) +
+    section('Stray folders in the server mods directory', d.orphanFolders || [], function(o) {
+      return row('<span class="mono">' + esc(o.folder) + '</span>', mb(o.bytes) + ' · no registered Workshop item',
+        '<button class="btn-danger btn-sm" onclick="deleteOrphan(\'folder\', decodeURIComponent(\'' + encodeURIComponent(o.folder) + '\'))">Delete</button>')
+    }) +
+    '</details></div>'
+}
+
+// Two confirms: the first states what and how much, the second is a deliberate speed bump before
+// an irreversible bulk delete. The server recomputes the audit anyway, so a stale page can only
+// ever delete things that are still orphaned.
+function deleteAllOrphans() {
+  var d = cachedAudit || {}
+  var n = (d.unregistered || []).length + (d.orphanFolders || []).length
+  if (!n) return
+  if (!confirm('Delete all ' + n + ' orphaned items?\n\n' +
+      (d.unregistered || []).length + ' unregistered Workshop item(s)\n' +
+      (d.orphanFolders || []).length + ' stray mods folder(s)\n\n' +
+      'Frees roughly ' + d.reclaimableHuman + '. None are referenced by servertest.ini, so nothing currently loaded is affected.')) return
+  if (!confirm('This cannot be undone.\n\nRe-downloading any of these later means fetching them from Steam again. Continue?')) return
+  showMsg('mods-msg', 'Deleting ' + n + ' orphaned item(s)...', 'info', 0)
+  fetch('/api/audit/orphans', { method: 'DELETE' })
+    .then(function(r) { return r.json().then(function(x) { return { ok: r.ok, d: x } }) })
+    .then(function(x) {
+      if (!x.ok || !x.d.success) throw new Error(x.d.error || 'delete failed')
+      var msg = 'Deleted ' + x.d.deleted + ' orphaned item(s) — freed ' + x.d.freed + '.'
+      if ((x.d.failed || []).length) msg += ' ' + x.d.failed.length + ' could not be removed.'
+      showMsg('mods-msg', msg, (x.d.failed || []).length ? 'error' : 'success', 10000)
+      fetchAudit(); fetchAlerts()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Delete all failed: ' + e.message, 'error', 0) })
+}
+
+function deleteOrphan(kind, id) {
+  if (!confirm('Delete ' + id + '?\n\nThis removes the files from disk. It is not referenced by servertest.ini, so nothing currently loaded is affected. Re-downloading later means fetching it from Steam again.')) return
+  fetch('/api/audit/orphan', { method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: kind, id: id }) })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok || !x.d.success) throw new Error(x.d.error || 'delete failed')
+      showMsg('mods-msg', 'Deleted ' + id + ' — freed ' + x.d.freed + '.', 'success', 6000)
+      fetchAudit()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not delete ' + id + ': ' + e.message, 'error', 0) })
+}
+
+// --- Mod auto-update ---
+function fetchAutoUpdate() {
+  fetch('/api/mods/autoupdate').then(function(r) { return r.json() }).then(function(d) {
+    document.getElementById('autoupdate-enabled').checked = !!d.enabled
+    document.getElementById('autoupdate-restart').checked = !!d.restartWhenEmpty
+    var bits = []
+    if (d.lastCheck) bits.push('Last check: ' + new Date(d.lastCheck).toLocaleString())
+    if (d.tracked) bits.push(d.tracked + ' mod(s) tracked')
+    if ((d.pending || []).length) bits.push('<strong style="color:#f5a623">' + d.pending.length + ' update(s) pending a restart</strong>')
+    if (d.lastRestart) bits.push('Last auto-restart: ' + new Date(d.lastRestart).toLocaleString())
+    var el = document.getElementById('autoupdate-status')
+    el.innerHTML = (d.lastResult ? '<div style="margin-bottom:.3rem">' + esc(d.lastResult) + '</div>' : '') +
+      (bits.length ? bits.join(' · ') : (d.enabled ? 'Enabled — first check runs within a few minutes.' : 'Disabled.'))
+  }).catch(function() {})
+}
+
+function saveAutoUpdate() {
+  var enabled = document.getElementById('autoupdate-enabled').checked
+  var restartWhenEmpty = document.getElementById('autoupdate-restart').checked
+  // Enabling never triggers an immediate mass update: the first check only records a baseline.
+  if (enabled && restartWhenEmpty && !confirm('Enable automatic restarts?\n\nWhen a mod update is found the server will be restarted to apply it — only once downloads finish and no players are connected. Anyone who joins in the meantime delays it.')) {
+    document.getElementById('autoupdate-restart').checked = false
+    restartWhenEmpty = false
+  }
+  fetch('/api/mods/autoupdate', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: enabled, restartWhenEmpty: restartWhenEmpty }) })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.success) throw new Error(d.error || 'save failed')
+      showMsg('settings-msg', enabled
+        ? 'Mod auto-update on — checking hourly.' + (restartWhenEmpty ? ' Will restart when empty.' : ' Restarts are off; updates download only.')
+        : 'Mod auto-update off.', 'success', 5000)
+      fetchAutoUpdate()
+    })
+    .catch(function(e) { showMsg('settings-msg', 'Could not save: ' + e.message, 'error', 0) })
+}
+
+function runAutoUpdateNow() {
+  fetch('/api/mods/autoupdate/check', { method: 'POST' })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok) throw new Error(x.d.error || 'check failed')
+      showMsg('settings-msg', x.d.message, 'info', 6000)
+      setTimeout(fetchAutoUpdate, 6000)
+    })
+    .catch(function(e) { showMsg('settings-msg', 'Check failed: ' + e.message, 'error', 0) })
+}
+
+// --- Server alerts (dashboard) ---
+var ALERT_STYLE = {
+  error: { colour: '#e74c3c', label: 'Error' },
+  warn:  { colour: '#f5a623', label: 'Warning' },
+  info:  { colour: '#60a5fa', label: 'Info' }
+}
+
+function fetchAlerts() {
+  fetch('/api/alerts').then(function(r) { return r.json() }).then(renderAlerts).catch(function() {})
+}
+
+function renderAlerts(d) {
+  var el = document.getElementById('dash-alerts')
+  if (!el) return
+  var alerts = (d && d.alerts) || []
+  if (!alerts.length) {
+    el.innerHTML = '<div class="card" style="margin-bottom:1.4rem;border-left:3px solid #2ecc71">' +
+      '<div class="card-title" style="margin-bottom:.3rem">Server Alerts</div>' +
+      '<div style="font-size:.82rem;color:var(--muted)">Nothing to report — no mod issues, orphaned files, failed downloads or notable errors.</div></div>'
+    return
+  }
+  var c = d.counts || {}
+  var worst = c.error ? '#e74c3c' : (c.warn ? '#f5a623' : '#60a5fa')
+  el.innerHTML = '<div class="card" style="margin-bottom:1.4rem;border-left:3px solid ' + worst + '">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.7rem">' +
+      '<div class="card-title" style="margin-bottom:0">Server Alerts</div>' +
+      '<span style="font-size:.75rem;color:var(--muted)">' +
+        (c.error ? '<span style="color:#e74c3c">' + c.error + ' error</span> · ' : '') +
+        (c.warn ? '<span style="color:#f5a623">' + c.warn + ' warning</span> · ' : '') +
+        (c.info || 0) + ' info' +
+        ' <button class="btn-secondary btn-sm" style="margin-left:.5rem" onclick="fetchAlerts()">Refresh</button></span>' +
+    '</div>' +
+    alerts.map(function(a) {
+      var st = ALERT_STYLE[a.severity] || ALERT_STYLE.info
+      var jump = a.tab ? '<button class="btn-secondary btn-sm" onclick="switchTab(\'' + a.tab + '\')">Open ' + a.tab + '</button>' : ''
+      return '<div style="display:flex;gap:.75rem;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;' +
+        'padding:.5rem .7rem;border-left:3px solid ' + st.colour + ';background:var(--bg);margin-bottom:.4rem;border-radius:3px">' +
+        '<div style="min-width:260px;flex:1">' +
+          '<span style="font-size:.66rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:' + st.colour + '">' + esc(a.category) + '</span>' +
+          '<div style="font-size:.83rem;margin-top:.1rem">' + esc(a.title) + '</div>' +
+          (a.detail ? '<div style="font-size:.73rem;color:var(--muted);margin-top:.15rem;word-break:break-word">' + esc(String(a.detail).slice(0, 300)) + '</div>' : '') +
+        '</div>' + jump + '</div>'
+    }).join('') + '</div>'
+}
+
+// --- Mod dependencies ---
+// PZ silently misbehaves when a require= isn't met, so this surfaces it. Nothing is auto-fixed:
+// authors list optional companion mods in require= constantly, so every row asks rather than acts.
+// <details> state survives the innerHTML rebuild these panels do on every refresh.
+// Both start open so a real problem is never hidden behind a collapsed panel on first load.
+var panelOpen = { deps: true, audit: true, order: false, installed: true, collections: true, add: true }
+var cachedDeps = { issues: [], ignored: [] }
+
+function fetchDependencies() {
+  fetch('/api/dependencies').then(function(r) { return r.json() }).then(function(d) {
+    cachedDeps = d
+    renderDependencies()
+  }).catch(function() {})
+}
+
+var DEP_KIND = {
+  incompatible: { colour: '#e74c3c', label: 'Conflict',
+    text: function(i) { return '<strong>' + esc(i.modName) + '</strong> declares it is incompatible with <strong>' + esc(i.dependencyName || i.dependency) + '</strong>, and both are loaded.' } },
+  missing: { colour: '#e74c3c', label: 'Missing',
+    text: function(i) { return '<strong>' + esc(i.modName) + '</strong> requires <strong>' + esc(i.dependency) + '</strong>, which is not installed.' } },
+  disabled: { colour: '#f5a623', label: 'Not loaded',
+    text: function(i) { return '<strong>' + esc(i.modName) + '</strong> requires <strong>' + esc(i.dependencyName || i.dependency) + '</strong>, which is installed but not enabled.' } },
+  order: { colour: '#60a5fa', label: 'Load order',
+    text: function(i) { return '<strong>' + esc(i.modName) + '</strong> must load after <strong>' + esc(i.dependencyName || i.dependency) + '</strong>, but currently loads before it (position ' + (i.modIndex + 1) + ' vs ' + (i.dependencyIndex + 1) + ').' } }
+}
+
+function renderDependencies() {
+  var el = document.getElementById('mods-deps')
+  if (!el) return
+  var issues = cachedDeps.issues || []
+  var ignored = (cachedDeps.ignored || []).length
+
+  if (!issues.length) {
+    el.innerHTML = ignored
+      ? '<div class="msg msg-info" style="margin-bottom:1rem;font-size:.82rem">' +
+        'All mod dependencies satisfied. <span style="opacity:.8">' + ignored + ' ignored ' +
+        '<a href="#" onclick="showIgnoredDeps();return false" style="color:#60a5fa">(review)</a>.</span></div>'
+      : ''
+    return
+  }
+
+  var rows = issues.map(function(i) {
+    var kind = DEP_KIND[i.type] || { colour: 'var(--muted)', label: i.type, text: function() { return esc(i.modId) } }
+    var actions = []
+    if (i.type === 'disabled' && i.dependencyModId) {
+      actions.push('<button class="btn-primary btn-sm" onclick="depEnable(decodeURIComponent(\'' + encodeURIComponent(i.dependencyModId) + '\'))">Enable ' + esc(i.dependencyModId) + '</button>')
+    }
+    if (i.type === 'incompatible') {
+      // Either side can go; the user knows which they actually want.
+      actions.push('<button class="btn-danger btn-sm" onclick="depDisable(decodeURIComponent(\'' + encodeURIComponent(i.modId) + '\'))">Disable ' + esc(i.modId) + '</button>')
+      if (i.dependencyModId) actions.push('<button class="btn-danger btn-sm" onclick="depDisable(decodeURIComponent(\'' + encodeURIComponent(i.dependencyModId) + '\'))">Disable ' + esc(i.dependencyModId) + '</button>')
+    }
+    if (i.type === 'missing') {
+      actions.push('<a class="btn-secondary btn-sm" target="_blank" style="text-decoration:none" ' +
+        'href="https://steamcommunity.com/workshop/browse/?appid=108600&searchtext=' + encodeURIComponent(i.dependency) + '">Find on Workshop</a>')
+    }
+    actions.push('<button class="btn-secondary btn-sm" onclick="depIgnore(decodeURIComponent(\'' + encodeURIComponent(i.modId) + '\'), decodeURIComponent(\'' + encodeURIComponent(i.dependency) + '\'), true)" ' +
+      'title="Hide this one pairing. Use when the mod lists an optional companion in require=.">Not required</button>')
+
+    return '<div style="display:flex;gap:.75rem;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;' +
+      'padding:.55rem .7rem;border-left:3px solid ' + kind.colour + ';background:var(--bg);margin-bottom:.4rem;border-radius:3px">' +
+      '<div style="min-width:260px;flex:1">' +
+        '<span style="font-size:.68rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:' + kind.colour + '">' + kind.label + '</span>' +
+        '<div style="font-size:.82rem;margin-top:.15rem">' + kind.text(i) + '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:.4rem;flex-wrap:wrap">' + actions.join('') + '</div>' +
+      '</div>'
+  }).join('')
+
+  var blocking = issues.filter(function(i) { return i.type === 'incompatible' || i.type === 'missing' }).length
+  el.innerHTML = '<div class="card" style="margin-bottom:1rem;border-left:3px solid ' + (blocking ? '#e74c3c' : '#f5a623') + '">' +
+    '<details' + (panelOpen.deps ? ' open' : '') + ' ontoggle="panelOpen.deps = this.open">' +
+    '<summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">' +
+      '<span class="card-title" style="margin-bottom:0">Dependency issues <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + issues.length + ')</span></span>' +
+      '<span style="font-size:.75rem;color:var(--muted)">Checked ' + cachedDeps.checked + ' loaded mods' +
+        (ignored ? ' · ' + ignored + ' ignored <a href="#" onclick="showIgnoredDeps();return false" style="color:#60a5fa">(review)</a>' : '') + '</span>' +
+    '</summary>' +
+    '<div style="font-size:.76rem;color:var(--muted);margin:.7rem 0">' +
+      'Read from each mod\'s <span class="mono">mod.info</span>. Authors often list optional companion mods as required — ' +
+      'use <strong>Not required</strong> to dismiss those. Nothing is changed automatically.</div>' +
+    rows + '</details></div>'
+}
+
+function depEnable(modId) {
+  fetch('/api/mods/enabled', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ modId: modId, enabled: true }) })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.success) throw new Error(d.error || 'unknown error')
+      showMsg('mods-msg', 'Enabled ' + modId + '. Restart the server to apply.', 'success', 6000)
+      fetchMods(); fetchDependencies()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not enable ' + modId + ': ' + e.message, 'error', 0) })
+}
+
+function depDisable(modId) {
+  if (!confirm('Disable ' + modId + '?\n\nIt stays installed; it just stops loading. Restart the server to apply.')) return
+  fetch('/api/mods/enabled', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ modId: modId, enabled: false }) })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.success) throw new Error(d.error || 'unknown error')
+      showMsg('mods-msg', 'Disabled ' + modId + '. Restart the server to apply.', 'success', 6000)
+      fetchMods(); fetchDependencies()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not disable ' + modId + ': ' + e.message, 'error', 0) })
+}
+
+function depIgnore(modId, dependency, ignored) {
+  fetch('/api/dependencies/ignore', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ modId: modId, dependency: dependency, ignored: ignored }) })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.success) throw new Error(d.error || 'unknown error')
+      showMsg('mods-msg', ignored ? 'Ignoring ' + modId + ' → ' + dependency + '.' : 'Restored ' + modId + ' → ' + dependency + '.', 'success', 4000)
+      fetchDependencies()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not update: ' + e.message, 'error', 0) })
+}
+
+// Ignored pairings are reversible, so they need somewhere to be reviewed.
+function showIgnoredDeps() {
+  var list = cachedDeps.ignored || []
+  if (!list.length) return
+  var el = document.getElementById('mods-deps')
+  el.insertAdjacentHTML('afterbegin',
+    '<div class="card" style="margin-bottom:1rem">' +
+    '<div class="card-title">Ignored dependencies <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + list.length + ')</span></div>' +
+    list.map(function(k) {
+      var parts = k.split('>')
+      return '<div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.4rem 0;font-size:.82rem">' +
+        '<span class="mono">' + esc(parts[0]) + ' → ' + esc(parts[1]) + '</span>' +
+        '<button class="btn-secondary btn-sm" onclick="depIgnore(decodeURIComponent(\'' + encodeURIComponent(parts[0]) + '\'), decodeURIComponent(\'' + encodeURIComponent(parts[1]) + '\'), false)">Restore</button>' +
+        '</div>'
+    }).join('') + '</div>')
 }
 
 // Clicking a tag chip narrows the table to that type.
@@ -1848,7 +2397,7 @@ function removeMod(workshopId) {
     .then(function(r) { return r.json() })
     .then(function(d) {
       showMsg('mods-msg', d.success ? 'Removed ' + workshopId + '. Restart to apply.' : 'Error: ' + d.error, d.success ? 'success' : 'error')
-      fetchMods()
+      fetchMods(); fetchDependencies()
     })
 }
 
@@ -2601,11 +3150,13 @@ function fetchSandboxBackups() {
 
 updateStatus()
 updateDashStats()
+fetchAlerts()
 fetchMods()
 fetchSchedule()
 fetchOnlinePlayers()
 setInterval(function() { if (activeTab === 'dashboard') fetchOnlinePlayers() }, 30000)
 setInterval(updateStatus, 15000)
+setInterval(function() { if (activeTab === 'dashboard') fetchAlerts() }, 120000)
 setInterval(updateSysInfo, 30000)
 setInterval(function() {
   if (activeTab === 'dashboard') {
