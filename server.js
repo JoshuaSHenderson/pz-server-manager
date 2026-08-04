@@ -8,6 +8,7 @@ const crypto = require('crypto')
 const net = require('net')
 const { prunableItems } = require('./prune')
 const { parseDepList, analyzeDependencies, sortIssues } = require('./deps')
+const { validateReorder } = require('./order')
 
 const app = express()
 app.use(express.json())
@@ -1632,6 +1633,189 @@ app.delete('/api/mods/:workshopId', (req, res) => {
   res.json({ success: true, workshopId, removedIds, removedFolders })
 })
 
+// --- Load order ---
+//
+// Mods= is load order: later entries override earlier ones, and mods with loadModAfter= expect to
+// sit behind their dependencies. Reordering rewrites the whole line, so every save snapshots the
+// previous order first — a bad drag is then one click to undo rather than a hand-rebuilt list of
+// 180 mod ids.
+function modOrderBackupDir(s) { return s.data + '/backups/mod-order' }
+const MOD_ORDER_BACKUP_KEEP = 20
+
+function listModOrderBackups(s) {
+  try {
+    return fs.readdirSync(modOrderBackupDir(s))
+      .filter(f => f.startsWith('Mods-') && f.endsWith('.json'))
+      .sort().reverse()
+      .map(f => {
+        let entry = {}
+        try { entry = JSON.parse(fs.readFileSync(path.join(modOrderBackupDir(s), f), 'utf8')) } catch {}
+        return { file: f, savedAt: entry.savedAt || '', label: entry.label || '', count: (entry.mods || []).length }
+      })
+  } catch { return [] }
+}
+
+function backupModOrder(s, label) {
+  const dir = modOrderBackupDir(s)
+  try { fs.mkdirSync(dir, { recursive: true }) } catch {}
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  const file = 'Mods-' + stamp + '.json'
+  fs.writeFileSync(path.join(dir, file), JSON.stringify({
+    savedAt: new Date().toISOString(),
+    label: label || '',
+    mods: getIniList(s, 'Mods')
+  }, null, 2))
+  // Keep the most recent few; these are tiny but unbounded growth is nobody's friend.
+  const all = listModOrderBackups(s)
+  for (const old of all.slice(MOD_ORDER_BACKUP_KEEP)) {
+    try { fs.unlinkSync(path.join(dir, old.file)) } catch {}
+  }
+  return file
+}
+
+app.get('/api/mods/order', (req, res) => {
+  const s = srv(req)
+  const meta = installedModMeta(s)
+  const byLower = {}
+  for (const [id, m] of Object.entries(meta)) byLower[id.toLowerCase()] = m
+  res.json({
+    mods: getIniList(s, 'Mods').map((id, i) => {
+      const m = byLower[id.toLowerCase()] || {}
+      return {
+        modId: id, index: i,
+        name: m.name || id,
+        workshopId: m.workshopId || null,
+        // Surfaced inline so the ordering constraints are visible while dragging.
+        loadModAfter: m.loadModAfter || [],
+        installed: !!byLower[id.toLowerCase()]
+      }
+    }),
+    backups: listModOrderBackups(s)
+  })
+})
+
+app.put('/api/mods/order', (req, res) => {
+  const s = srv(req)
+  const next = (req.body || {}).mods
+  const current = getIniList(s, 'Mods')
+  // Must be a permutation: reordering may never add or drop a mod. That is what the per-mod
+  // toggles are for, and a silent change here would alter what the server loads.
+  const check = validateReorder(current, next)
+  if (!check.ok) return res.status(400).json({ error: check.error })
+  const backup = backupModOrder(s, (req.body || {}).label || 'before reorder')
+  setIniList(s, 'Mods', next)
+  res.json({ success: true, count: next.length, backup })
+})
+
+app.get('/api/mods/order/backups', (req, res) => res.json({ backups: listModOrderBackups(srv(req)) }))
+
+app.post('/api/mods/order/restore', (req, res) => {
+  const s = srv(req)
+  const { file } = req.body || {}
+  if (!file || !/^Mods-[\w-]+\.json$/.test(file)) return res.status(400).json({ error: 'Invalid backup file' })
+  const full = path.join(modOrderBackupDir(s), file)
+  if (!fs.existsSync(full)) return res.status(404).json({ error: 'No such backup: ' + file })
+  let saved
+  try { saved = JSON.parse(fs.readFileSync(full, 'utf8')) } catch (e) { return res.status(500).json({ error: 'Backup is unreadable: ' + e.message }) }
+  // The snapshot may predate a mod being enabled or removed, so it is only valid if it still
+  // describes exactly the current mod set — otherwise restoring it would change what loads.
+  const check = validateReorder(getIniList(s, 'Mods'), saved.mods || [])
+  if (!check.ok) return res.status(409).json({ error: 'Backup no longer matches the enabled mods — ' + check.error })
+  const backup = backupModOrder(s, 'before restoring ' + file)
+  setIniList(s, 'Mods', saved.mods)
+  res.json({ success: true, restored: file, count: saved.mods.length, backup })
+})
+
+// --- Disk audit ---
+//
+// Full visibility over what is actually on disk versus what the ini claims. Mods routinely get
+// half-removed: a Workshop item unregistered but its files left behind, or a folder copied into
+// the server's mods dir whose Workshop item is long gone. Those cost disk and confuse later
+// installs, and nothing else in here would ever surface them.
+function dirSizeBytes(p) {
+  try { return parseInt(execSync('du -sb ' + JSON.stringify(p) + ' 2>/dev/null || true', { timeout: 20000 }).toString().split(/\s+/)[0], 10) || 0 }
+  catch { return 0 }
+}
+
+function auditServer(s) {
+  const registered = getIniList(s, 'WorkshopItems')
+  const registeredSet = new Set(registered)
+  const enabled = getIniList(s, 'Mods')
+  const meta = installedModMeta(s)                       // registered items only
+  const providedLower = new Set(Object.keys(meta).map(id => id.toLowerCase()))
+
+  // Every Workshop id sitting in the content dir, registered or not.
+  let onDisk = []
+  try { onDisk = fs.readdirSync(workshopContent(s)).filter(f => /^\d+$/.test(f)) } catch {}
+
+  // Downloaded but not in WorkshopItems= — pure wasted disk.
+  const unregistered = onDisk.filter(id => !registeredSet.has(id)).map(id => ({
+    workshopId: id,
+    folders: (() => { try { return fs.readdirSync(path.join(workshopContent(s), id, 'mods')) } catch { return [] } })(),
+    bytes: dirSizeBytes(path.join(workshopContent(s), id))
+  }))
+
+  // Registered but no mod content on disk — the server will fail to load these.
+  const missingContent = registered.filter(id => !hasModContent(s, id))
+
+  // Folders copied into the server's mods dir with no registered Workshop item behind them.
+  const expectedFolders = new Set()
+  for (const wid of registered) for (const f of modNamesFromWorkshop(s, wid)) expectedFolders.add(f)
+  let modsDirFolders = []
+  try { modsDirFolders = fs.readdirSync(modsDir(s), { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name) } catch {}
+  const orphanFolders = modsDirFolders.filter(f => !expectedFolders.has(f)).map(f => ({
+    folder: f, bytes: dirSizeBytes(path.join(modsDir(s), f))
+  }))
+
+  // Enabled in Mods= but no installed mod.info provides that id — silently does nothing.
+  const phantomEnabled = enabled.filter(id => !providedLower.has(id.toLowerCase()))
+
+  // Installed and available but not loaded. Informational, not a problem.
+  const enabledLower = new Set(enabled.map(id => id.toLowerCase()))
+  const installedNotEnabled = Object.keys(meta).filter(id => !enabledLower.has(id.toLowerCase()))
+
+  const reclaimable = unregistered.reduce((n, u) => n + u.bytes, 0) + orphanFolders.reduce((n, o) => n + o.bytes, 0)
+
+  return {
+    registered: registered.length,
+    enabled: enabled.length,
+    onDisk: onDisk.length,
+    unregistered, missingContent, orphanFolders, phantomEnabled, installedNotEnabled,
+    reclaimableBytes: reclaimable,
+    reclaimableHuman: humanBytes(reclaimable),
+    freeBytes: freeBytes(s),
+    freeHuman: humanBytes(freeBytes(s))
+  }
+}
+
+app.get('/api/audit', (req, res) => {
+  try { res.json(auditServer(srv(req))) }
+  catch (e) { res.status(500).json({ error: e.message }) }
+})
+
+// Deletes one orphaned artefact found by the audit. Scoped deliberately: only things the audit
+// classed as unreferenced, never a registered mod.
+app.delete('/api/audit/orphan', (req, res) => {
+  const s = srv(req)
+  const { kind, id } = req.body || {}
+  if (!id || typeof id !== 'string') return res.status(400).json({ error: 'id is required' })
+  const audit = auditServer(s)
+  let target
+  if (kind === 'workshop') {
+    if (!audit.unregistered.some(u => u.workshopId === id)) return res.status(400).json({ error: 'Not an unregistered Workshop item: ' + id })
+    target = path.join(workshopContent(s), id)
+  } else if (kind === 'folder') {
+    if (!audit.orphanFolders.some(o => o.folder === id)) return res.status(400).json({ error: 'Not an orphaned mod folder: ' + id })
+    target = path.join(modsDir(s), id)
+  } else {
+    return res.status(400).json({ error: 'kind must be "workshop" or "folder"' })
+  }
+  const bytes = dirSizeBytes(target)
+  try { execSync('rm -rf ' + JSON.stringify(target)) }
+  catch (e) { return res.status(500).json({ error: 'Delete failed: ' + e.message }) }
+  res.json({ success: true, kind, id, freed: humanBytes(bytes) })
+})
+
 // --- Mod dependencies ---
 //
 // PZ won't tell you a dependency is unmet; the mod just misbehaves in-game. These endpoints read
@@ -1694,6 +1878,126 @@ app.post('/api/dependencies/ignore', (req, res) => {
   if (ignored) list.push(key)
   writeDepIgnores(s, list)
   res.json({ success: true, key, ignored })
+})
+
+// --- Server alerts ---
+//
+// One place that answers "is anything wrong with this server right now", pulling from every
+// source that already knows something: dependency analysis, the disk audit, the download queue,
+// and errors in both log streams. Nothing here is new detection — it is the existing signals
+// gathered so the dashboard doesn't require visiting four tabs to notice a problem.
+
+// The PZ log runs to tens of thousands of lines; scanning it on every dashboard poll would be
+// wasteful, so results are cached briefly.
+const ALERT_LOG_TTL = 30 * 1000
+const alertLogCache = {} // [serverId] = { at, server: [], manager: [] }
+
+// Collapses repeated errors into one entry with a count. Numbers, hashes and file paths are
+// stripped from the grouping key so "missing X.xml" and "missing Y.xml" group as one problem.
+function summariseLogErrors(text, pattern) {
+  const groups = new Map()
+  for (const raw of String(text || '').split('\n')) {
+    if (!pattern.test(raw)) continue
+    const line = stripAnsi(raw).trim()
+    if (!line) continue
+    const key = line
+      .replace(/^\S*\s*/, m => m)
+      .replace(/f:\d+ st:[\d,]+/g, '')
+      .replace(/\d{4}-\d{2}-\d{2}T[\d:.Z]+/g, '')
+      .replace(/"[^"]*"/g, '"…"')
+      .replace(/\/\S+/g, '/…')
+      .replace(/\d{3,}/g, 'N')
+      .slice(0, 160)
+    const g = groups.get(key)
+    if (g) g.count++
+    else groups.set(key, { count: 1, sample: line.slice(0, 240) })
+  }
+  return [...groups.values()].sort((a, b) => b.count - a.count).slice(0, 8)
+}
+
+function collectLogAlerts(s, cb) {
+  const hit = alertLogCache[s.id]
+  if (hit && Date.now() - hit.at < ALERT_LOG_TTL) return cb(hit)
+  const done = { at: Date.now(), server: [], manager: [] }
+  let pending = 2
+  const finish = () => { if (--pending <= 0) { alertLogCache[s.id] = done; cb(done) } }
+  exec('docker logs ' + s.container + ' --since 60m --tail 4000 2>&1', { maxBuffer: 16 * 1024 * 1024 }, (e, out) => {
+    done.server = summariseLogErrors(out, /^ERROR|SEVERE|FATAL/)
+    finish()
+  })
+  const own = ownContainerId()
+  if (!own) return finish()
+  exec('docker logs ' + own + ' --since 60m --tail 2000 2>&1', { maxBuffer: 8 * 1024 * 1024 }, (e, out) => {
+    done.manager = summariseLogErrors(out, /error|failed|exception/i)
+    finish()
+  })
+}
+
+app.get('/api/alerts', (req, res) => {
+  const s = srv(req)
+  const alerts = []
+  const push = (severity, category, title, detail, extra) =>
+    alerts.push(Object.assign({ severity, category, title, detail }, extra || {}))
+
+  // Dependencies
+  let depIssues = []
+  try {
+    const meta = installedModMeta(s)
+    depIssues = sortIssues(analyzeDependencies({
+      enabled: getIniList(s, 'Mods'), installed: Object.keys(meta), meta, ignores: readDepIgnores(s)
+    }))
+  } catch (e) {}
+  const conflicts = depIssues.filter(i => i.type === 'incompatible')
+  const missingDeps = depIssues.filter(i => i.type === 'missing')
+  const disabledDeps = depIssues.filter(i => i.type === 'disabled')
+  const orderIssues = depIssues.filter(i => i.type === 'order')
+  if (conflicts.length) push('error', 'mods', conflicts.length + ' mod conflict(s)', conflicts.map(i => i.modId + ' ⇄ ' + i.dependency).join(', '), { tab: 'mods' })
+  if (missingDeps.length) push('error', 'mods', missingDeps.length + ' missing dependenc(ies)', missingDeps.map(i => i.modId + ' → ' + i.dependency).join(', '), { tab: 'mods' })
+  if (disabledDeps.length) push('warn', 'mods', disabledDeps.length + ' dependenc(ies) installed but not loaded', disabledDeps.map(i => i.modId + ' → ' + i.dependency).join(', '), { tab: 'mods' })
+  if (orderIssues.length) push('info', 'mods', orderIssues.length + ' load-order issue(s)', orderIssues.map(i => i.modId + ' should load after ' + i.dependency).join(', '), { tab: 'mods' })
+
+  // Disk / files
+  let audit = null
+  try { audit = auditServer(s) } catch (e) {}
+  if (audit) {
+    if (audit.missingContent.length) push('error', 'files', audit.missingContent.length + ' registered mod(s) missing files', 'Registered in WorkshopItems but nothing on disk: ' + audit.missingContent.join(', '), { tab: 'mods' })
+    if (audit.phantomEnabled.length) push('warn', 'files', audit.phantomEnabled.length + ' enabled mod id(s) not provided by any install', audit.phantomEnabled.join(', '), { tab: 'mods' })
+    if (audit.unregistered.length || audit.orphanFolders.length) {
+      push('warn', 'files', 'Orphaned mod files on disk (' + audit.reclaimableHuman + ' reclaimable)',
+        audit.unregistered.length + ' unregistered Workshop item(s), ' + audit.orphanFolders.length + ' stray mods folder(s)', { tab: 'mods' })
+    }
+    if (audit.freeBytes && audit.freeBytes < 10 * 1024 * 1024 * 1024) {
+      push('error', 'disk', 'Low disk space: ' + audit.freeHuman + ' free', 'Each mod is stored twice (workshop copy + server mods folder).')
+    }
+  }
+
+  // Downloads: failures, and what changed recently
+  const queue = readQueue(s)
+  const failed = queue.filter(e => e.status === 'failed')
+  if (failed.length) push('error', 'downloads', failed.length + ' failed download(s)', failed.slice(0, 5).map(e => e.id + ': ' + (e.error || 'unknown')).join(' | '), { tab: 'mods' })
+  const dayAgo = Date.now() - 24 * 3600 * 1000
+  const recent = queue.filter(e => e.status === 'installed' && e.updatedAt && new Date(e.updatedAt).getTime() > dayAgo)
+  if (recent.length) push('info', 'updates', recent.length + ' mod(s) installed or updated in the last 24h', recent.slice(0, 8).map(e => (e.modIds || [e.id]).join(', ')).join(' · '), { tab: 'mods' })
+
+  collectLogAlerts(s, logs => {
+    for (const g of logs.server) {
+      push(g.count > 50 ? 'warn' : 'info', 'server-log', g.count + '× ' + (g.sample.slice(0, 90)), g.sample, { tab: 'logs' })
+    }
+    for (const g of logs.manager) {
+      push('warn', 'manager-log', g.count + '× ' + (g.sample.slice(0, 90)), g.sample, { tab: 'logs' })
+    }
+    const rank = { error: 0, warn: 1, info: 2 }
+    alerts.sort((a, b) => rank[a.severity] - rank[b.severity])
+    res.json({
+      alerts,
+      counts: {
+        error: alerts.filter(a => a.severity === 'error').length,
+        warn: alerts.filter(a => a.severity === 'warn').length,
+        info: alerts.filter(a => a.severity === 'info').length
+      },
+      generatedAt: new Date().toISOString()
+    })
+  })
 })
 
 // --- Collections ---

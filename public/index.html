@@ -542,6 +542,9 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
   <div id="tab-dashboard" class="tab-pane active">
     <div class="pane-head"><h1>Dashboard</h1><p>Server status, control, and restart scheduling</p></div>
     <div id="dash-msg"></div>
+    <!-- Aggregated health: mod issues, orphaned files, failed downloads, recent updates and
+         notable errors from both log streams. Hidden entirely when there is nothing to say. -->
+    <div id="dash-alerts"></div>
     <div class="card">
       <div class="card-title">Server Control</div>
       <div class="stat-grid">
@@ -683,6 +686,8 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       </div>
       <div id="mods-problems"></div>
       <div id="mods-deps"></div>
+      <div id="mods-audit"></div>
+      <div id="mods-order"></div>
       <div id="mods-table"></div>
     </div>
 
@@ -1148,7 +1153,7 @@ function switchTab(tab) {
   document.getElementById('tab-' + tab).classList.add('active')
   if (tab === 'logs') { startLog(); startManagerLog() }
   else { stopLog(); stopManagerLog() }
-  if (tab === 'mods') { fetchMods(); fetchCollections(); fetchDependencies(); startDownloadPoll() }
+  if (tab === 'mods') { fetchMods(); fetchCollections(); fetchDependencies(); fetchAudit(); startDownloadPoll() }
   if (tab === 'players') fetchPlayers()
   if (tab === 'settings') fetchNotifSettings()
   if (tab === 'config') { fetchConfig(); fetchSandbox() }
@@ -1608,6 +1613,235 @@ function setModEnabled(cb, modId) {
       showMsg('mods-msg', 'Could not update ' + modId + ': ' + e.message, 'error', 0)
     })
     .finally(function() { cb.disabled = false })
+}
+
+// --- Load order ---
+// Mods= is load order: later entries win, and loadModAfter= mods expect to sit behind their
+// dependencies. Edits are staged locally and only written when Save is pressed, so a mis-drag
+// costs nothing until then.
+var orderState = { mods: [], original: [], backups: [], open: false }
+
+function fetchModOrder() {
+  fetch('/api/mods/order').then(function(r) { return r.json() }).then(function(d) {
+    orderState.mods = (d.mods || []).map(function(m) { return m })
+    orderState.original = orderState.mods.map(function(m) { return m.modId })
+    orderState.backups = d.backups || []
+    renderModOrder()
+  }).catch(function() {})
+}
+
+function orderDirty() {
+  return orderState.mods.map(function(m) { return m.modId }).join(' ') !== orderState.original.join(' ')
+}
+
+function toggleOrderEditor() {
+  orderState.open = !orderState.open
+  if (orderState.open) fetchModOrder()
+  else renderModOrder()
+}
+
+function renderModOrder() {
+  var el = document.getElementById('mods-order')
+  if (!el) return
+  if (!orderState.open) {
+    el.innerHTML = '<div style="margin-bottom:1rem">' +
+      '<button class="btn-secondary btn-sm" onclick="toggleOrderEditor()">Edit load order</button>' +
+      '<span style="font-size:.75rem;color:var(--muted);margin-left:.6rem">Mods= order decides which mod wins when two change the same thing.</span></div>'
+    return
+  }
+  var dirty = orderDirty()
+  var rows = orderState.mods.map(function(m, i) {
+    // A mod that must load after another is flagged inline, so the constraint is visible while moving things.
+    var after = (m.loadModAfter || []).length
+      ? '<span style="font-size:.68rem;color:#60a5fa"> after: ' + esc(m.loadModAfter.join(', ')) + '</span>' : ''
+    return '<div style="display:flex;align-items:center;gap:.5rem;padding:.25rem .5rem;border-bottom:1px solid var(--border)">' +
+      '<span class="mono" style="font-size:.7rem;color:var(--muted);width:2.6rem;text-align:right">' + (i + 1) + '</span>' +
+      '<span style="flex:1;font-size:.8rem;min-width:0;word-break:break-word">' + esc(m.modId) +
+        (m.installed ? '' : ' <span style="color:#e74c3c;font-size:.68rem">(not installed)</span>') + after + '</span>' +
+      '<button class="btn-secondary btn-sm" title="Move up" onclick="moveOrder(' + i + ',' + (i - 1) + ')"' + (i === 0 ? ' disabled' : '') + '>&#9650;</button>' +
+      '<button class="btn-secondary btn-sm" title="Move down" onclick="moveOrder(' + i + ',' + (i + 1) + ')"' + (i === orderState.mods.length - 1 ? ' disabled' : '') + '>&#9660;</button>' +
+      '<button class="btn-secondary btn-sm" title="Move to top" onclick="moveOrder(' + i + ',0)">Top</button>' +
+      '<button class="btn-secondary btn-sm" title="Move to bottom" onclick="moveOrder(' + i + ',' + (orderState.mods.length - 1) + ')">Bottom</button>' +
+      '</div>'
+  }).join('')
+
+  var backups = orderState.backups.length
+    ? '<div style="margin-top:.8rem;font-size:.76rem;color:var(--muted)">' +
+      '<strong>Backups</strong> (a snapshot is taken automatically before every save)' +
+      orderState.backups.slice(0, 8).map(function(b) {
+        return '<div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.25rem 0">' +
+          '<span class="mono">' + esc(b.file) + ' <span style="opacity:.7">' + (b.label ? esc(b.label) + ' · ' : '') + b.count + ' mods</span></span>' +
+          '<button class="btn-secondary btn-sm" onclick="restoreModOrder(decodeURIComponent(\'' + encodeURIComponent(b.file) + '\'))">Restore</button>' +
+          '</div>'
+      }).join('') + '</div>'
+    : '<div style="margin-top:.8rem;font-size:.76rem;color:var(--muted)">No backups yet — one is taken automatically before each save.</div>'
+
+  el.innerHTML = '<div class="card" style="margin-bottom:1rem">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">' +
+      '<div class="card-title" style="margin-bottom:0">Load order <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + orderState.mods.length + ')</span></div>' +
+      '<div style="display:flex;gap:.4rem;flex-wrap:wrap">' +
+        '<button class="btn-primary btn-sm" onclick="saveModOrder()"' + (dirty ? '' : ' disabled') + '>Save order</button>' +
+        '<button class="btn-secondary btn-sm" onclick="fetchModOrder()"' + (dirty ? '' : ' disabled') + '>Discard changes</button>' +
+        '<button class="btn-secondary btn-sm" onclick="toggleOrderEditor()">Close</button>' +
+      '</div></div>' +
+    (dirty ? '<div class="msg msg-info" style="margin-bottom:.6rem;font-size:.8rem">Unsaved changes — nothing is written until you press Save order.</div>' : '') +
+    '<div style="max-height:420px;overflow-y:auto;border:1px solid var(--border);border-radius:3px">' + rows + '</div>' +
+    backups + '</div>'
+}
+
+function moveOrder(from, to) {
+  if (to < 0 || to >= orderState.mods.length) return
+  var item = orderState.mods.splice(from, 1)[0]
+  orderState.mods.splice(to, 0, item)
+  renderModOrder()
+}
+
+function saveModOrder() {
+  var mods = orderState.mods.map(function(m) { return m.modId })
+  if (!confirm('Save this load order?\n\n' + mods.length + ' mods. The current order is backed up first, and the server must be restarted to apply.')) return
+  fetch('/api/mods/order', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mods: mods, label: 'manual reorder' }) })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok || !x.d.success) throw new Error(x.d.error || 'save failed')
+      showMsg('mods-msg', 'Load order saved (' + x.d.count + ' mods). Previous order backed up as ' + x.d.backup + '. Restart to apply.', 'success', 9000)
+      fetchModOrder(); fetchMods(); fetchDependencies()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not save order: ' + e.message, 'error', 0) })
+}
+
+function restoreModOrder(file) {
+  if (!confirm('Restore load order from ' + file + '?\n\nThe current order is backed up first. Restart the server to apply.')) return
+  fetch('/api/mods/order/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file: file }) })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok || !x.d.success) throw new Error(x.d.error || 'restore failed')
+      showMsg('mods-msg', 'Restored ' + file + ' (' + x.d.count + ' mods). Restart to apply.', 'success', 9000)
+      fetchModOrder(); fetchMods(); fetchDependencies()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not restore: ' + e.message, 'error', 0) })
+}
+
+// --- Disk audit ---
+// What is actually on disk versus what the ini claims. Half-removed mods leave files behind that
+// nothing else surfaces, and they cost real disk.
+var cachedAudit = null
+
+function fetchAudit() {
+  fetch('/api/audit').then(function(r) { return r.json() }).then(function(d) {
+    cachedAudit = d
+    renderAudit()
+  }).catch(function() {})
+}
+
+function renderAudit() {
+  var el = document.getElementById('mods-audit')
+  if (!el || !cachedAudit) return
+  var d = cachedAudit
+  var problems = (d.unregistered || []).length + (d.orphanFolders || []).length +
+                 (d.missingContent || []).length + (d.phantomEnabled || []).length
+  if (!problems) {
+    el.innerHTML = '<div class="msg msg-info" style="margin-bottom:1rem;font-size:.8rem">' +
+      'Mod files match the config — ' + d.registered + ' registered, ' + d.enabled + ' loaded, ' + d.onDisk + ' on disk. ' +
+      d.freeHuman + ' free.</div>'
+    return
+  }
+  function section(title, items, render) {
+    if (!items.length) return ''
+    return '<div style="margin-bottom:.7rem"><div style="font-size:.72rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:.3rem">' +
+      title + ' (' + items.length + ')</div>' + items.map(render).join('') + '</div>'
+  }
+  var row = function(label, note, btn) {
+    return '<div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.3rem .5rem;background:var(--bg);margin-bottom:.2rem;border-radius:3px">' +
+      '<span style="font-size:.79rem;min-width:0;word-break:break-word">' + label +
+      (note ? ' <span style="color:var(--muted);font-size:.72rem">' + note + '</span>' : '') + '</span>' + (btn || '') + '</div>'
+  }
+  var mb = function(b) { return b > 1073741824 ? (b / 1073741824).toFixed(1) + ' GB' : Math.round(b / 1048576) + ' MB' }
+
+  el.innerHTML = '<div class="card" style="margin-bottom:1rem;border-left:3px solid #f5a623">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">' +
+      '<div class="card-title" style="margin-bottom:0">Mod &amp; game folder audit</div>' +
+      '<span style="font-size:.75rem;color:var(--muted)">' + d.registered + ' registered · ' + d.enabled + ' loaded · ' + d.onDisk + ' on disk · ' +
+      '<strong>' + d.reclaimableHuman + ' reclaimable</strong> · ' + d.freeHuman + ' free' +
+      ' <button class="btn-secondary btn-sm" style="margin-left:.4rem" onclick="fetchAudit()">Rescan</button></span>' +
+    '</div>' +
+    section('Registered but no files on disk — the server cannot load these', d.missingContent || [], function(id) {
+      return row('<span class="mono">' + esc(id) + '</span>', 'in WorkshopItems, nothing downloaded',
+        '<button class="btn-secondary btn-sm" onclick="retryDownload(\'' + esc(id) + '\')">Re-download</button>')
+    }) +
+    section('Enabled but not provided by any installed mod', d.phantomEnabled || [], function(id) {
+      return row('<span class="mono">' + esc(id) + '</span>', 'in Mods= but no mod.info declares it',
+        '<button class="btn-secondary btn-sm" onclick="depDisable(decodeURIComponent(\'' + encodeURIComponent(id) + '\'))">Remove from Mods=</button>')
+    }) +
+    section('Downloaded but not registered — wasted disk', d.unregistered || [], function(u) {
+      return row('<span class="mono">' + esc(u.workshopId) + '</span>',
+        (u.folders || []).slice(0, 2).join(', ') + ' · ' + mb(u.bytes),
+        '<button class="btn-danger btn-sm" onclick="deleteOrphan(\'workshop\', decodeURIComponent(\'' + encodeURIComponent(u.workshopId) + '\'))">Delete</button>')
+    }) +
+    section('Stray folders in the server mods directory', d.orphanFolders || [], function(o) {
+      return row('<span class="mono">' + esc(o.folder) + '</span>', mb(o.bytes) + ' · no registered Workshop item',
+        '<button class="btn-danger btn-sm" onclick="deleteOrphan(\'folder\', decodeURIComponent(\'' + encodeURIComponent(o.folder) + '\'))">Delete</button>')
+    }) +
+    '</div>'
+}
+
+function deleteOrphan(kind, id) {
+  if (!confirm('Delete ' + id + '?\n\nThis removes the files from disk. It is not referenced by servertest.ini, so nothing currently loaded is affected. Re-downloading later means fetching it from Steam again.')) return
+  fetch('/api/audit/orphan', { method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: kind, id: id }) })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(x) {
+      if (!x.ok || !x.d.success) throw new Error(x.d.error || 'delete failed')
+      showMsg('mods-msg', 'Deleted ' + id + ' — freed ' + x.d.freed + '.', 'success', 6000)
+      fetchAudit()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not delete ' + id + ': ' + e.message, 'error', 0) })
+}
+
+// --- Server alerts (dashboard) ---
+var ALERT_STYLE = {
+  error: { colour: '#e74c3c', label: 'Error' },
+  warn:  { colour: '#f5a623', label: 'Warning' },
+  info:  { colour: '#60a5fa', label: 'Info' }
+}
+
+function fetchAlerts() {
+  fetch('/api/alerts').then(function(r) { return r.json() }).then(renderAlerts).catch(function() {})
+}
+
+function renderAlerts(d) {
+  var el = document.getElementById('dash-alerts')
+  if (!el) return
+  var alerts = (d && d.alerts) || []
+  if (!alerts.length) {
+    el.innerHTML = '<div class="card" style="margin-bottom:1.4rem;border-left:3px solid #2ecc71">' +
+      '<div class="card-title" style="margin-bottom:.3rem">Server Alerts</div>' +
+      '<div style="font-size:.82rem;color:var(--muted)">Nothing to report — no mod issues, orphaned files, failed downloads or notable errors.</div></div>'
+    return
+  }
+  var c = d.counts || {}
+  var worst = c.error ? '#e74c3c' : (c.warn ? '#f5a623' : '#60a5fa')
+  el.innerHTML = '<div class="card" style="margin-bottom:1.4rem;border-left:3px solid ' + worst + '">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.7rem">' +
+      '<div class="card-title" style="margin-bottom:0">Server Alerts</div>' +
+      '<span style="font-size:.75rem;color:var(--muted)">' +
+        (c.error ? '<span style="color:#e74c3c">' + c.error + ' error</span> · ' : '') +
+        (c.warn ? '<span style="color:#f5a623">' + c.warn + ' warning</span> · ' : '') +
+        (c.info || 0) + ' info' +
+        ' <button class="btn-secondary btn-sm" style="margin-left:.5rem" onclick="fetchAlerts()">Refresh</button></span>' +
+    '</div>' +
+    alerts.map(function(a) {
+      var st = ALERT_STYLE[a.severity] || ALERT_STYLE.info
+      var jump = a.tab ? '<button class="btn-secondary btn-sm" onclick="switchTab(\'' + a.tab + '\')">Open ' + a.tab + '</button>' : ''
+      return '<div style="display:flex;gap:.75rem;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;' +
+        'padding:.5rem .7rem;border-left:3px solid ' + st.colour + ';background:var(--bg);margin-bottom:.4rem;border-radius:3px">' +
+        '<div style="min-width:260px;flex:1">' +
+          '<span style="font-size:.66rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:' + st.colour + '">' + esc(a.category) + '</span>' +
+          '<div style="font-size:.83rem;margin-top:.1rem">' + esc(a.title) + '</div>' +
+          (a.detail ? '<div style="font-size:.73rem;color:var(--muted);margin-top:.15rem;word-break:break-word">' + esc(String(a.detail).slice(0, 300)) + '</div>' : '') +
+        '</div>' + jump + '</div>'
+    }).join('') + '</div>'
 }
 
 // --- Mod dependencies ---
@@ -2736,11 +2970,13 @@ function fetchSandboxBackups() {
 
 updateStatus()
 updateDashStats()
+fetchAlerts()
 fetchMods()
 fetchSchedule()
 fetchOnlinePlayers()
 setInterval(function() { if (activeTab === 'dashboard') fetchOnlinePlayers() }, 30000)
 setInterval(updateStatus, 15000)
+setInterval(function() { if (activeTab === 'dashboard') fetchAlerts() }, 120000)
 setInterval(updateSysInfo, 30000)
 setInterval(function() {
   if (activeTab === 'dashboard') {
