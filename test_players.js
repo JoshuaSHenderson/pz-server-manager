@@ -1,6 +1,6 @@
 // Run: node test_players.js
 const assert = require('assert')
-const { makeState, applyLine, replay, onlineNames } = require('./players')
+const { makeState, applyLine, replay, onlineNames, parseConnectedCount } = require('./players')
 
 const ID = '76561198036178683'
 const ID2 = '76561198072495346'
@@ -93,5 +93,15 @@ for (const junk of ['', 'Connection add index=0 guid=1 id=null.', 'random text',
 }
 assert.deepStrictEqual(replay(undefined).online, [])
 assert.deepStrictEqual(replay('').online, [])
+
+// --- RCON `players` reply: the empty server must be readable as empty, not as silence ---
+// This is the auto-updater's restart gate. A server with no user log yet (nobody has connected
+// since it started) is exactly the case the log parser above cannot answer.
+assert.strictEqual(parseConnectedCount('Players connected (0): \n'), 0)
+assert.strictEqual(parseConnectedCount('Players connected (2): \n-Rick\n-Carl\n'), 2)
+// Anything that is not a reply stays unknown, so callers fall back instead of reading it as empty.
+for (const junk of ['', null, undefined, 'Unknown command', 'players']) {
+  assert.strictEqual(parseConnectedCount(junk), null)
+}
 
 console.log('players: all assertions passed')

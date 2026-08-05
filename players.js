@@ -92,4 +92,18 @@ function onlineNames(state) {
   return [...state.online.values(), ...state.namesOnly]
 }
 
-module.exports = { makeState, applyLine, replay, onlineNames }
+// The reply to PZ's RCON `players` command: "Players connected (2): \n-Rick\n-Carl\n".
+//
+// Asking the server directly is the only way to tell "nobody is on" from "no log to read". PZ
+// creates <date>_user.txt lazily, on the first connection of a session, so a server that has been
+// restarted and not yet joined has no user log at all — exactly the state the auto-updater needs
+// to recognise as empty.
+//
+// Returns null when the text is not a `players` reply (RCON down, unexpected build), so callers
+// can fall back rather than read silence as zero.
+function parseConnectedCount(text) {
+  const m = String(text || '').match(/Players connected\s*\((\d+)\)/i)
+  return m ? parseInt(m[1], 10) : null
+}
+
+module.exports = { makeState, applyLine, replay, onlineNames, parseConnectedCount }
