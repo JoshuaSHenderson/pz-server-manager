@@ -10,7 +10,7 @@ const { prunableItems } = require('./prune')
 const { parseDepList, analyzeDependencies, sortIssues } = require('./deps')
 const { validateReorder } = require('./order')
 const { outdatedItems, seedState, dueForCheck, shouldRestart } = require('./autoupdate')
-const { makeState: makePlayerState, applyLine: applyPlayerLine, replay: replayPlayerLog, onlineNames: playerNames } = require('./players')
+const { makeState: makePlayerState, applyLine: applyPlayerLine, replay: replayPlayerLog, onlineNames: playerNames, parseConnectedCount } = require('./players')
 
 const app = express()
 app.use(express.json())
@@ -745,6 +745,24 @@ function onlinePlayersFor(s) {
   } catch { return [] }
 }
 
+// How many players are connected, asked of the server itself.
+//
+// The user log cannot answer this on an empty server: PZ creates <date>_user.txt on the first
+// connection of a session, so after a restart that nobody has joined there is no log at all —
+// which reads as "cannot see" and is indistinguishable from a stale log full of ghosts. That is
+// precisely the state the auto-updater must recognise as empty, so it deadlocked: it would only
+// restart while a log existed, and every restart took the log away.
+//
+// cb(null) means genuinely unknown (RCON down, server still loading) — callers must keep treating
+// that as "someone might be on".
+function playerCountFor(s, cb) {
+  rconCommand(s, 'players', (err, out) => {
+    const n = err ? null : parseConnectedCount(out)
+    if (n !== null) return cb(n)
+    cb(findLatestUserLog(s) ? onlinePlayersFor(s).length : null)
+  })
+}
+
 // Player event log monitor
 function findLatestUserLog(s) {
   try {
@@ -772,8 +790,18 @@ function pollUserLog(s) {
       // empty, so anyone who connected before the manager (re)started would leave with nothing to
       // match against and no "Player Left" would ever fire. Events from the replay are discarded —
       // they already happened.
+      //
+      // A *rotation* is the opposite case: PZ restarted and opened a fresh log, so everything in
+      // it is happening now. Seeding past it swallowed the first join after every restart. Read it
+      // from the start instead and let the normal path below report it.
+      const rotated = st.userLogPath !== null
       st.userLogPath = latest
-      st.userLogPos = size
+      st.userLogPos = rotated ? 0 : size
+      if (rotated) {
+        st.players = makePlayerState()
+        logFor(s, 'watching ' + path.basename(latest) + ' — new log after a server restart')
+        return
+      }
       try {
         st.players = replayPlayerLog(fs.readFileSync(latest, 'utf8')).state
         const names = playerNames(st.players)
@@ -847,6 +875,9 @@ for (const s of allServers()) {
 
 // ===== RCON =====
 
+const AUTH_ID = 1
+const CMD_ID = 2
+
 function rconCommand(s, command, cb) {
   const pass = getIniValue(s, 'RCONPassword', '')
   const port = parseInt(getIniValue(s, 'RCONPort', '27015')) || 27015
@@ -878,21 +909,32 @@ function rconCommand(s, command, cb) {
 
   client.setTimeout(5000, () => finish(new Error('RCON timeout')))
   client.on('error', finish)
-  client.on('connect', () => client.write(makePacket(1, 3, pass)))
+  client.on('connect', () => client.write(makePacket(AUTH_ID, 3, pass)))
   client.on('data', (data) => {
     buf = Buffer.concat([buf, data])
     while (buf.length >= 12) {
       const size = buf.readInt32LE(0)
       if (buf.length < 4 + size) break
       const id = buf.readInt32LE(4)
+      const type = buf.readInt32LE(8)
       const bodyLen = Math.max(0, size - 10)
       const pktBody = buf.slice(12, 12 + bodyLen).toString('utf8')
       buf = buf.slice(4 + size)
+      // PZ answers an auth with an empty RESPONSE_VALUE (type 0) *before* the AUTH_RESPONSE
+      // (type 2). Counting that first packet as the auth, and then the auth response as the
+      // command's output, is why every command used to come back with an empty body — harmless
+      // for servermsg, useless for anything whose answer we actually need.
       if (!authed) {
+        if (type !== 2) continue
         if (id === -1) return finish(new Error('RCON auth failed'))
         authed = true
-        client.write(makePacket(2, 2, command))
-      } else {
+        client.write(makePacket(CMD_ID, 2, command))
+        continue
+      }
+      // ponytail: first response packet wins. PZ splits replies over 4096 bytes, which `players`
+      // would only reach at ~500 connected names; reassemble on the empty-packet sentinel if a
+      // command that big ever needs reading.
+      if (id === CMD_ID) {
         responseBody += pktBody
         finish(null)
       }
@@ -2120,10 +2162,9 @@ function runAutoUpdate(s) {
   const finish = () => writeAutoUpdate(s, cfg)
 
   // Step 1 — restart if a previous pass left updates waiting and the server is now clear.
-  activeDownloadCount(s, active => {
-    // A missing user log means we cannot prove the server is empty, so report unknown rather
-    // than zero: shouldRestart() treats unknown as "someone might be on".
-    const players = findLatestUserLog(s) ? onlinePlayersFor(s).length : null
+  // Both inputs are asked of the running server first; playerCountFor() still reports null when
+  // nothing can answer, and shouldRestart() treats that as "someone might be on".
+  const decide = (active, players) => {
     const verdict = shouldRestart({
       enabled: cfg.enabled, restartWhenEmpty: cfg.restartWhenEmpty,
       pending: cfg.pending, activeDownloads: active, playersOnline: players
@@ -2179,15 +2220,31 @@ function runAutoUpdate(s) {
         return writeAutoUpdate(s, cur)
       }
 
-      console.log('[autoupdate] ' + serverLabel(s) + ': ' + outdated.length + ' mod(s) updated on Steam — downloading')
+      // Stamps are only recorded once a restart has applied them, so the same mod stays outdated
+      // on every check until then — deliberately, since that is what retries a failed download.
+      // What must not repeat is the download and the push for an id already sitting installed and
+      // waiting: on a server that stays busy that fired every hour, for days.
+      const installed = new Set(readQueue(s).filter(e => e.status === 'installed').map(e => String(e.id)))
+      const waiting = (cur.pending || []).filter(id => installed.has(String(id)))
+      const fresh = outdated.filter(id => !waiting.includes(id))
+
       cur.pending = [...new Set([...(cur.pending || []), ...outdated])]
       cur.pendingTimes = Object.assign({}, cur.pendingTimes || {}, times)
-      cur.lastResult = outdated.length + ' update(s) downloading, queued ' + new Date().toISOString()
+
+      if (!fresh.length) {
+        cur.lastResult = cur.pending.length + ' update(s) downloaded — waiting for an empty server to restart.'
+        return writeAutoUpdate(s, cur)
+      }
+
+      console.log('[autoupdate] ' + serverLabel(s) + ': ' + fresh.length + ' mod(s) updated on Steam — downloading')
+      cur.lastResult = fresh.length + ' update(s) downloading, queued ' + new Date().toISOString()
       writeAutoUpdate(s, cur)
-      steamcmdDownload(s, outdated, 'autoupdate', null)
-      pushoverFor(s, 'PZ Mod Updates Found', outdated.length + ' mod(s) updated on Steam — downloading, will restart when the server is empty.')
+      steamcmdDownload(s, fresh, 'autoupdate', null)
+      pushoverFor(s, 'PZ Mod Updates Found', fresh.length + ' mod(s) updated on Steam — downloading, will restart when the server is empty.')
     })
-  })
+  }
+
+  activeDownloadCount(s, active => playerCountFor(s, players => decide(active, players)))
 }
 
 setInterval(() => { for (const s of allServers()) { try { runAutoUpdate(s) } catch (e) { console.error('[autoupdate]', e.message) } } }, AUTOUPDATE_TICK_MS)
