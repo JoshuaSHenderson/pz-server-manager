@@ -10,6 +10,7 @@ const { prunableItems } = require('./prune')
 const { parseDepList, analyzeDependencies, sortIssues } = require('./deps')
 const { validateReorder } = require('./order')
 const { outdatedItems, seedState, dueForCheck, shouldRestart } = require('./autoupdate')
+const { readyCheck } = require('./ready')
 const { makeState: makePlayerState, applyLine: applyPlayerLine, replay: replayPlayerLog, onlineNames: playerNames, parseConnectedCount } = require('./players')
 
 const app = express()
@@ -639,10 +640,21 @@ function mstate(s) {
 const SERVER_READY_MARKER = '*** SERVER STARTED ***'
 const READY_WAIT_MS = 45 * 60 * 1000
 
-function markAwaitingReady(s) {
+// Start waiting for the readiness marker of the run that is about to begin.
+//
+// The run must have started *after* this instant. Callers issue their `docker restart` on the very
+// next line, and a restart takes a few seconds to come back — so for those seconds `docker inspect`
+// still reports the *old* run's StartedAt, and `docker logs --since <that>` still contains the old
+// run's marker. Watching without this floor announced "ready" within seconds of every restart, and
+// measured the wait from the previous boot: on this server that read as 153m 8s.
+//
+// alreadyRunning=true is for the crash monitor, which notices a container that is already back up.
+// There the current run *is* the one to watch, so no floor applies.
+function markAwaitingReady(s, alreadyRunning) {
   const st = mstate(s)
   st.awaitingReady = true
   st.awaitingSince = Date.now()
+  st.readyMinStart = alreadyRunning ? 0 : Date.now()
 }
 
 // Crash monitor
@@ -659,7 +671,7 @@ setInterval(() => {
       }
       // Any transition into running — ours or a crash-restart — starts the wait for readiness.
       // Skipped on the manager's first observation so restarting the manager alone can't fire it.
-      if (st.lastKnownStatus && st.lastKnownStatus !== 'running' && status === 'running') markAwaitingReady(s)
+      if (st.lastKnownStatus && st.lastKnownStatus !== 'running' && status === 'running') markAwaitingReady(s, true)
       st.intentionalStop = false
       st.lastKnownStatus = status
     })
@@ -680,18 +692,17 @@ setInterval(() => {
     exec('docker inspect ' + s.container + ' --format "{{.State.StartedAt}}"', (e1, startedAt) => {
       const since = (startedAt || '').trim()
       if (!since) return
-      exec('docker logs ' + s.container + ' --since ' + since + ' 2>&1 | grep -F ' + JSON.stringify(SERVER_READY_MARKER) + ' | tail -1',
+      // -t so the marker carries the moment it was printed — see ready.js.
+      exec('docker logs -t ' + s.container + ' --since ' + since + ' 2>&1 | grep -F ' + JSON.stringify(SERVER_READY_MARKER) + ' | tail -1',
         { maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
-          if (!(out || '').trim()) return
+          const verdict = readyCheck({ startedAt: since, readyMinStart: st.readyMinStart, markerLine: out })
+          if (!verdict.ready) return
           if (!st.awaitingReady) return   // another tick won the race
           st.awaitingReady = false
-          const secs = Math.round((Date.now() - new Date(since).getTime()) / 1000)
-          const mins = Math.floor(secs / 60)
-          const took = mins ? mins + 'm ' + (secs % 60) + 's' : secs + 's'
-          console.log('[ready] ' + serverLabel(s) + ': accepting players after ' + took)
+          console.log('[ready] ' + serverLabel(s) + ': accepting players after ' + verdict.took)
           const cfg = readNotifConfig()
           if (cfg.enabled && cfg.events && cfg.events.serverReady !== false) {
-            pushoverFor(s, 'PZ Server Ready', 'Finished loading after ' + took + ' — accepting players now.')
+            pushoverFor(s, 'PZ Server Ready', 'Finished loading after ' + verdict.took + ' — accepting players now.')
           }
         })
     })

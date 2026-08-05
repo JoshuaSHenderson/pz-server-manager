@@ -6,11 +6,30 @@ Built with Node.js + Express. Runs as a sidecar Docker container alongside the P
 
 ## Features
 
-- **Dashboard** — server status, one-click Start / Stop / Restart, CPU / Memory / Disk stats
+- **Dashboard** — server status, live player count, every manual action (Start / Stop / Restart, warned restarts), CPU / Memory / Disk stats
+- **Config** — **Restarts & Updates** in one place at the top, then the server's own `servertest.ini` settings and sandbox options
 - **Mods** — install mods by Steam Workshop ID, remove mods, live download progress tracking
 - **Players** — whitelist management, access level control, ban/unban
 - **Logs** — live streaming server logs with filter and keyword coloring
-- **Settings** — Pushover push notifications for server and player events
+- **Settings** — Pushover push notifications and Discord status card
+- **Works on a phone** — the whole UI is usable at 390px, so a restart can be scheduled or a mod added from bed
+
+### Restarts & Updates
+
+Both ways the server restarts itself are one card at the top of **Config**, deliberately styled apart from
+everything below it: those write `servertest.ini` and need a restart to take effect, while these are the
+manager's own settings and apply the moment they are saved.
+
+| | |
+|---|---|
+| **Scheduled restart** | Daily at a set time, or every N hours. In-game warnings at T-10, T-5 and T-1 via RCON. |
+| **Restart for mod updates** | Checks Steam hourly, downloads what changed, and restarts to apply it — but only while nobody is connected. |
+
+The player count comes from the server itself over RCON rather than from the PZ user log. PZ writes that log
+lazily, on the first connection of a session, so an empty server that has just restarted has no log at all —
+which used to read as "cannot tell" and blocked the restart forever, exactly when it should have fired.
+
+The schedule runs on the manager container's wall clock, so set `TZ` (see Setup) or 4:00 means 4:00 UTC.
 
 ### Notification events
 
@@ -27,11 +46,28 @@ Built with Node.js + Express. Runs as a sidecar Docker container alongside the P
 
 ## Screenshots
 
-Captured from a live server running 148 Workshop items / 183 loaded mods.
+Captured from a live server running 149 Workshop items / 183 loaded mods.
+
+### Restarts & Updates
+
+The scheduled restart and the mod-update restart, together at the top of Config. The badge and the accent
+border are the point: everything below this card is a PZ setting, and nothing in it is.
+
+![Restarts and Updates card](docs/screenshots/08-restarts-and-updates.png)
+
+### On a phone
+
+Same UI, no separate mobile build. The sidebar becomes a top bar with a scrollable tab strip, two-column
+forms collapse to one, stat tiles pack three across, and wide tables scroll inside their card instead of
+dragging the page sideways.
+
+| Dashboard | Restarts & Updates | Mods |
+|---|---|---|
+| ![Mobile dashboard](docs/screenshots/09-mobile-dashboard.png) | ![Mobile restarts and updates](docs/screenshots/10-mobile-restarts.png) | ![Mobile mods](docs/screenshots/11-mobile-mods.png) |
 
 ### Dashboard — Server Alerts
 
-Mod issues, orphaned files, failed downloads, recent updates and notable errors from both log streams, gathered in one place.
+Mod issues, orphaned files, failed downloads, recent updates and notable errors from both log streams, gathered in one place. Every manual server action lives here too — including the warned restarts, which used to be buried in the restart schedule.
 
 ![Dashboard with Server Alerts](docs/screenshots/01-dashboard.png)
 
