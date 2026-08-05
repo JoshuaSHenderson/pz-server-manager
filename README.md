@@ -81,10 +81,17 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./workshop:/workshop
       - ./data:/pz-data
+    environment:
+      - TZ=America/New_York
     restart: unless-stopped
     depends_on:
       - zomboid
 ```
+
+Set `TZ` to your own zone. The scheduled restart runs on this container's wall clock, so
+without it a schedule of 8:00 fires at 8:00 **UTC** — 4am if you are on US Eastern — and the
+dashboard's "Server time" reads UTC to match. Use a named zone rather than `EST`: named zones
+follow daylight saving, so 8:00 stays 8:00 in July.
 
 Copy the `mod-manager/` directory into your PZ compose project, then:
 
