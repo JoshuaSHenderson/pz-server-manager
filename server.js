@@ -692,8 +692,6 @@ setInterval(() => {
     exec('docker inspect ' + s.container + ' --format "{{.State.StartedAt}}"', (e1, startedAt) => {
       const since = (startedAt || '').trim()
       if (!since) return
-      // Cheap pre-check: no point reading the log while docker still reports the run we replaced.
-      if (readyCheck({ startedAt: since, readyMinStart: st.readyMinStart }).wait === 'container has not come back up yet') return
       // -t so the marker carries the moment it was printed — see ready.js.
       exec('docker logs -t ' + s.container + ' --since ' + since + ' 2>&1 | grep -F ' + JSON.stringify(SERVER_READY_MARKER) + ' | tail -1',
         { maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
