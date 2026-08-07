@@ -11,6 +11,7 @@ const { parseDepList, analyzeDependencies, sortIssues } = require('./deps')
 const { validateReorder } = require('./order')
 const { outdatedItems, seedState, dueForCheck, shouldRestart } = require('./autoupdate')
 const { readyCheck } = require('./ready')
+const { saveThenGoDown } = require('./save')
 const { makeState: makePlayerState, applyLine: applyPlayerLine, replay: replayPlayerLog, onlineNames: playerNames, parseConnectedCount } = require('./players')
 
 const app = express()
@@ -953,6 +954,16 @@ function rconCommand(s, command, cb) {
   })
 }
 
+// Every path that takes a container down goes through here — see save.js for why a plain
+// `docker stop` never gets the world written.
+function saveThen(s, next) {
+  saveThenGoDown({
+    rcon: (cmd, cb) => rconCommand(s, cmd, cb),
+    wait: (ms, cb) => setTimeout(cb, ms),
+    log: (m) => console.log('[RCON] ' + s.name + ' ' + m),
+  }, next)
+}
+
 function sendIngameMsg(s, msg) {
   const safe = msg.replace(/"/g, "'")
   rconCommand(s, 'servermsg "' + safe + '"', (err) => {
@@ -1006,13 +1017,13 @@ setInterval(() => {
       lastRestartMinute[s.id] = totalNow
       console.log('[Schedule] ' + s.name + ' scheduled restart triggered at', now.toLocaleTimeString())
       mstate(s).intentionalStop = true
-      exec('docker restart ' + s.container, { timeout: 90000 }, (err) => {
+      saveThen(s, () => exec('docker restart ' + s.container, { timeout: 90000 }, (err) => {
         if (err) return console.error('[Schedule] ' + s.name + ' restart failed:', err.message)
         const desc = sched.mode === 'interval'
           ? 'Server restarted on schedule (every ' + sched.intervalHours + 'h).'
           : 'Server restarted on schedule at ' + (parseInt(sched.hour) || 4) + ':' + String(parseInt(sched.minute) || 0).padStart(2, '0')
         pushoverFor(s, 'PZ Scheduled Restart', desc)
-      })
+      }))
     } else if ([10, 5, 1].includes(minutesBefore)) {
       sendIngameMsg(s, 'Server restarting in ' + minutesBefore + ' minute' + (minutesBefore > 1 ? 's' : '') + '!')
     }
@@ -1169,14 +1180,14 @@ app.post('/api/server/stop', (req, res) => {
   const s = srv(req)
   logFor(s, 'stop requested via UI')
   mstate(s).intentionalStop = true
-  exec('docker stop ' + s.container, { timeout: 60000 }, (err) => {
+  saveThen(s, () => exec('docker stop ' + s.container, { timeout: 60000 }, (err) => {
     const ok = !err
     if (ok) {
       const cfg = readNotifConfig()
       if (cfg.enabled && cfg.events && cfg.events.serverStop) pushoverFor(s, 'PZ Server Stopped', 'Project Zomboid server has been stopped.')
     }
     res.json({ success: ok, error: err?.message })
-  })
+  }))
 })
 
 app.post('/api/server/restart', (req, res) => {
@@ -1184,14 +1195,14 @@ app.post('/api/server/restart', (req, res) => {
   logFor(s, 'restart requested via UI')
   mstate(s).intentionalStop = true
   markAwaitingReady(s)
-  exec('docker restart ' + s.container, { timeout: 60000 }, (err) => {
+  saveThen(s, () => exec('docker restart ' + s.container, { timeout: 60000 }, (err) => {
     const ok = !err
     if (ok) {
       const cfg = readNotifConfig()
       if (cfg.enabled && cfg.events && cfg.events.serverStart) pushoverFor(s, 'PZ Server Restarted', 'Project Zomboid server has been restarted.')
     }
     res.json({ success: ok, error: err?.message })
-  })
+  }))
 })
 
 // Warned restart: send in-game countdown messages then restart
@@ -1207,7 +1218,7 @@ app.post('/api/server/warned-restart', (req, res) => {
   })
   setTimeout(() => {
     mstate(s).intentionalStop = true
-    exec('docker restart ' + s.container, { timeout: 90000 }, () => {})
+    saveThen(s, () => exec('docker restart ' + s.container, { timeout: 90000 }, () => {}))
   }, delayMin * 60000)
 })
 
@@ -2185,7 +2196,7 @@ function runAutoUpdate(s) {
       console.log('[autoupdate] ' + serverLabel(s) + ': restarting for ' + cfg.pending.length + ' updated mod(s)')
       mstate(s).intentionalStop = true
       markAwaitingReady(s)
-      exec('docker restart ' + s.container, { timeout: 120000 }, err => {
+      saveThen(s, () => exec('docker restart ' + s.container, { timeout: 120000 }, err => {
         const cur = readAutoUpdate(s)
         if (err) {
           cur.lastResult = 'Restart failed: ' + err.message
@@ -2201,7 +2212,7 @@ function runAutoUpdate(s) {
           pushoverFor(s, 'PZ Mods Auto-Updated', 'Server was empty — restarted to apply updated mods.')
         }
         writeAutoUpdate(s, cur)
-      })
+      }))
       return
     }
     if (cfg.pending.length) cfg.lastResult = 'Waiting to restart: ' + verdict.reason
