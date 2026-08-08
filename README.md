@@ -31,6 +31,12 @@ which used to read as "cannot tell" and blocked the restart forever, exactly whe
 
 The schedule runs on the manager container's wall clock, so set `TZ` (see Setup) or 4:00 means 4:00 UTC.
 
+Every way the server goes down — Stop, Restart, warned, scheduled, or for a mod update — asks PZ to save
+over RCON first and gives it a moment to write. `docker stop` alone never gets the world saved: the signal
+lands on the container's PID 1 rather than the game, so the JVM is killed with its shutdown hook unrun and
+the world falls back to the last autosave. If RCON cannot answer, the server still goes down — an unsaved
+restart beats one that never happens.
+
 ### Notification events
 
 | Event | Description |
