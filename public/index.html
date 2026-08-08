@@ -470,11 +470,48 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
 }
 @keyframes shimmer { from { transform: translateX(-100%) } to { transform: translateX(100%) } }
 
+/* ============ MANAGER AUTOMATION CARD ============ */
+/* Sits at the top of Config and must not read as a PZ setting: accent edge, its own badge, and
+   sub-sections instead of two separate cards on two separate tabs. */
+.mgr-card {
+  border-color: rgba(244,63,94,.32);
+  background:
+    linear-gradient(180deg, rgba(244,63,94,.06), transparent 120px),
+    var(--bg2);
+}
+.mgr-card > details > summary { border-bottom: 1px solid var(--border) ; padding-bottom: .7rem }
+.pill {
+  display: inline-block; vertical-align: middle;
+  margin-left: .6rem; padding: .18rem .55rem;
+  border: 1px solid rgba(244,63,94,.35); border-radius: 999px;
+  background: rgba(244,63,94,.1);
+  color: #fda4b4;
+  font-family: var(--font-mono); font-size: .6rem; font-weight: 500;
+  letter-spacing: .12em; text-transform: uppercase;
+  white-space: nowrap;
+}
+.mgr-note { font-size: .8rem; color: var(--muted); margin: .9rem 0 1.2rem }
+.mgr-section { padding: 1.1rem 0; border-top: 1px solid var(--border) }
+.mgr-section:first-of-type { border-top: none; padding-top: .2rem }
+.mgr-head {
+  font-family: var(--font-display); font-size: .95rem; font-weight: 700;
+  letter-spacing: .02em; margin-bottom: .9rem;
+}
+.mgr-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap }
+.mgr-hint { font-size: .78rem; color: var(--muted); margin-bottom: 1rem }
+.toggle-label { display: flex; align-items: center; gap: .6rem; cursor: pointer; font-size: .875rem }
+
 .time-picker { display: flex; align-items: center; gap: .5rem }
 .time-picker input[type=number] { width: 64px; text-align: center; font-size: 1.05rem; padding: .45rem; font-family: var(--font-mono) }
 .time-picker span { color: var(--muted); font-size: 1.1rem; font-weight: 700 }
 
+/* Two-column form grids in Config. A class rather than the inline styles they replaced, so the
+   phone breakpoint can collapse them without !important. */
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.5rem }
+.form-grid-tight { gap: .7rem }
+
 /* ============ RESPONSIVE ============ */
+/* Tablet / small laptop: the sidebar becomes a top bar. */
 @media (max-width: 900px) {
   .sidebar { position: sticky; top: 0; bottom: auto; width: 100%; flex-direction: row; align-items: center; gap: .75rem; padding: .6rem .9rem; border-right: none; border-bottom: 1px solid var(--border) }
   .sidebar::before { display: none }
@@ -489,6 +526,66 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
   .sidebar-foot { display: none }
   .app { flex-direction: column }
   main { margin-left: 0; padding: 1.25rem 1rem 3rem }
+}
+
+/* ============ PHONE ============ */
+/* The top bar cannot hold brand + status + server picker + seven tabs on one line at 390px, so it
+   wraps into three: identity, server picker, then the tab strip as its own scrollable row. */
+@media (max-width: 620px) {
+  .sidebar { flex-wrap: wrap; gap: .5rem .75rem; padding: .55rem .75rem }
+  .brand { order: 1 }
+  #status-badge { order: 2; margin-left: auto }
+  .sidebar > div:has(#server-select) { order: 3; flex: 1 0 100% }
+  .server-select { margin: 0 }
+  nav {
+    order: 4; flex: 1 0 100%; margin-left: 0;
+    flex-wrap: nowrap; overflow-x: auto; gap: .2rem;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  nav::-webkit-scrollbar { display: none }
+  .tab-btn { flex: 0 0 auto; min-width: 46px; min-height: 42px; justify-content: center; padding: .5rem }
+  .tab-btn svg { width: 20px; height: 20px }
+
+  main { padding: 1rem .7rem 2.5rem }
+  .pane-head { margin-bottom: 1.1rem }
+  .pane-head h1 { font-size: 1.5rem }
+  .pane-head p { font-size: .78rem }
+  .card { padding: 1rem .9rem; margin-bottom: 1rem; border-radius: 12px }
+
+  /* Denser stat tiles: three per row at 390px instead of two with dead space. */
+  .stat-grid { grid-template-columns: repeat(auto-fit, minmax(102px, 1fr)); gap: .55rem }
+  .stat { padding: .7rem .5rem }
+
+  /* Anything two-up becomes one-up: config fields, gameplay flags, sandbox rows. */
+  .form-grid, .grid2, .sandbox-field { grid-template-columns: 1fr !important }
+
+  /* Tables keep their columns and scroll sideways inside the card rather than squashing to
+     illegible or pushing the whole page wide. Covers the JS-rendered tables too. */
+  .card table { display: block; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch }
+  .card table th, .card table td { white-space: nowrap }
+
+  /* 16px is the threshold below which iOS Safari zooms the page on focus. */
+  input, select, textarea { font-size: 16px }
+  .server-select { font-size: 15px }
+  input[type=checkbox] { font-size: inherit }
+
+  /* Comfortable touch targets, and full-width action buttons instead of a cramped wrap. */
+  button { min-height: 42px }
+  .btn-sm { min-height: 34px }
+  .control-row { gap: .5rem }
+  .control-row > button { flex: 1 1 46%; justify-content: center }
+  /* Input-plus-button rows: the button keeps its label on one line, the input takes the rest. */
+  .row > button { flex: 0 0 auto; white-space: nowrap }
+
+  /* The badge earns its own line rather than squeezing the title into two words per row. */
+  .card-title { flex-wrap: wrap }
+  .pill { margin-left: 0; margin-top: .35rem }
+  /* Selects, labels and the time picker stack instead of wrapping into ragged rows. */
+  .mgr-row { flex-direction: column; align-items: flex-start; gap: .6rem }
+  .mgr-row .server-select { width: 100% }
+  #log-output { height: 55vh }
+  #mlog-output { height: 30vh; min-height: 150px }
 }
 .server-select {
   width: 100%;
@@ -567,7 +664,7 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
 <main>
   <!-- DASHBOARD -->
   <div id="tab-dashboard" class="tab-pane active">
-    <div class="pane-head"><h1>Dashboard</h1><p>Server status, control, and restart scheduling</p></div>
+    <div class="pane-head"><h1>Dashboard</h1><p>Server status, live players, and manual control</p></div>
     <div id="dash-msg"></div>
     <!-- Aggregated health: mod issues, orphaned files, failed downloads, recent updates and
          notable errors from both log streams. Hidden entirely when there is nothing to say. -->
@@ -585,10 +682,14 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         <div class="stat"><div class="stat-value" id="dash-mem" style="font-size:1.1rem">—</div><div class="stat-label">Memory</div></div>
         <div class="stat"><div class="stat-value" id="dash-disk" style="font-size:1.1rem">—</div><div class="stat-label">Disk Used</div></div>
       </div>
+      <!-- Every *manual* server action lives here now. The two warned restarts used to sit inside
+           the restart schedule card, which mixed a thing you do with a thing you configure. -->
       <div class="control-row">
         <button class="btn-success" id="btn-start" onclick="serverAction('start')">Start</button>
         <button class="btn-danger" id="btn-stop" onclick="serverAction('stop')">Stop</button>
         <button class="btn-warn" id="btn-restart" onclick="serverAction('restart')">Restart</button>
+        <button class="btn-warn" onclick="warnedRestart()">Warn &amp; Restart in 10 min</button>
+        <button class="btn-secondary" onclick="customWarnedRestart()">Custom delay...</button>
       </div>
     
 
@@ -609,50 +710,6 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       <div style="display:flex;align-items:center;gap:.75rem">
         <button class="btn-secondary btn-sm" onclick="fetchOnlinePlayers()">Refresh</button>
         <span id="online-updated" style="font-size:.7rem;color:var(--muted);font-family:var(--font-mono)"></span>
-      </div>
-    
-
-      </details>
-</div>
-
-    <div class="card">
-      <details open>
-
-        <summary><span class="card-title">Restart Schedule</span></summary>
-      <div id="sched-msg"></div>
-      <div style="display:flex;align-items:center;gap:1.25rem;margin-bottom:1rem;flex-wrap:wrap">
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.9rem">
-          <input type="checkbox" id="sched-enabled">
-          Auto-restart enabled
-        </label>
-        <span id="sched-server-time" style="font-size:.78rem;color:var(--muted);font-family:var(--font-mono)"></span>
-      </div>
-      <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap">
-        <select id="sched-mode" class="server-select" style="width:auto;margin:0" onchange="schedModeChanged()">
-          <option value="daily">Once daily</option>
-          <option value="interval">Every N hours</option>
-        </select>
-        <select id="sched-interval" class="server-select" style="width:auto;margin:0;display:none">
-          <option value="2">every 2 hours</option>
-          <option value="6">every 6 hours</option>
-          <option value="12">every 12 hours</option>
-          <option value="24">every 24 hours</option>
-        </select>
-        <span id="sched-at-label" style="font-size:.85rem;color:var(--muted)">Restart at</span>
-        <div class="time-picker">
-          <input type="number" id="sched-hour" min="0" max="23" value="4">
-          <span>:</span>
-          <input type="number" id="sched-minute" min="0" max="59" value="0" style="width:64px">
-        </div>
-        <span style="font-size:.78rem;color:var(--muted)">(server local time)</span>
-      </div>
-      <p style="font-size:.78rem;color:var(--muted);margin-bottom:1rem">
-        In-game warnings sent at T-10, T-5, T-1 minutes via RCON.
-      </p>
-      <div class="control-row">
-        <button class="btn-primary" onclick="saveSchedule()">Save Schedule</button>
-        <button class="btn-warn" onclick="warnedRestart()">Warn &amp; Restart in 10 min</button>
-        <button class="btn-secondary" onclick="customWarnedRestart()">Custom delay...</button>
       </div>
     
 
@@ -843,14 +900,83 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
 
   <!-- CONFIG -->
   <div id="tab-config" class="tab-pane">
-    <div class="pane-head"><h1>Config</h1><p>Server settings — restart required to apply</p></div>
+    <div class="pane-head"><h1>Config</h1><p>Restart automation, and the server's own settings</p></div>
     <div id="config-msg"></div>
+
+    <!-- Manager automation, deliberately first and deliberately not styled like the rest of this
+         tab. Everything below writes servertest.ini and needs a server restart to take effect;
+         these two are the manager's own settings and apply the moment they are saved. Keeping
+         them here rather than on the dashboard puts every "how the server runs" decision on one
+         tab, and the accent border is what stops them reading as PZ settings. -->
+    <div class="card mgr-card">
+      <details open>
+        <summary><span class="card-title" style="margin-bottom:0">Restarts &amp; Updates <span class="pill">manager · applies instantly</span></span></summary>
+        <p class="mgr-note">
+          Run by the manager, not by the game server. Nothing here is written to
+          <span class="mono">servertest.ini</span>, so saving takes effect straight away.
+        </p>
+        <div id="sched-msg"></div>
+
+        <div class="mgr-section">
+          <div class="mgr-head">Scheduled restart</div>
+          <div class="mgr-row">
+            <label class="toggle-label">
+              <input type="checkbox" id="sched-enabled">
+              Restart on a schedule
+            </label>
+            <span id="sched-server-time" class="mono" style="font-size:.78rem;color:var(--muted)"></span>
+          </div>
+          <div class="mgr-row">
+            <select id="sched-mode" class="server-select" style="width:auto;margin:0" onchange="schedModeChanged()">
+              <option value="daily">Once daily</option>
+              <option value="interval">Every N hours</option>
+            </select>
+            <select id="sched-interval" class="server-select" style="width:auto;margin:0;display:none">
+              <option value="2">every 2 hours</option>
+              <option value="6">every 6 hours</option>
+              <option value="12">every 12 hours</option>
+              <option value="24">every 24 hours</option>
+            </select>
+            <span id="sched-at-label" style="font-size:.85rem;color:var(--muted)">Restart at</span>
+            <div class="time-picker">
+              <input type="number" id="sched-hour" min="0" max="23" value="4">
+              <span>:</span>
+              <input type="number" id="sched-minute" min="0" max="59" value="0" style="width:64px">
+            </div>
+            <span style="font-size:.78rem;color:var(--muted)">(server local time)</span>
+          </div>
+          <p class="mgr-hint">In-game warnings sent at T-10, T-5 and T-1 minutes via RCON.</p>
+          <button class="btn-primary" onclick="saveSchedule()">Save Schedule</button>
+        </div>
+
+        <div class="mgr-section">
+          <div class="mgr-head">Restart for mod updates</div>
+          <p class="mgr-hint" style="margin-top:0">
+            Checks Steam hourly for updates to installed Workshop items. Updated mods are downloaded, and once
+            the downloads finish the server restarts to apply them — but only while nobody is connected. The
+            player count comes from the server itself over RCON, so an empty server is recognised even when it
+            has just restarted and written no player log yet.
+          </p>
+          <div style="display:grid;gap:.7rem;margin-bottom:1rem">
+            <label class="toggle-label">
+              <input type="checkbox" id="autoupdate-enabled" onchange="saveAutoUpdate()"> Check hourly for mod updates
+            </label>
+            <label class="toggle-label">
+              <input type="checkbox" id="autoupdate-restart" onchange="saveAutoUpdate()"> Restart once downloads finish and the server is empty
+            </label>
+          </div>
+          <div id="autoupdate-status" style="font-size:.78rem;color:var(--muted);margin-bottom:.8rem"></div>
+          <button class="btn-secondary btn-sm" onclick="runAutoUpdateNow()">Check now</button>
+        </div>
+      </details>
+    </div>
+
     <div class="card">
       <details open>
 
         <summary><span class="card-title">Server Settings</span></summary>
       <p style="font-size:.85rem;color:var(--muted);margin:0 0 1.25rem">Changes require a server restart to take effect.</p>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem">
+      <div class="form-grid">
         <div>
           <label style="display:block;font-size:.72rem;color:var(--muted);margin-bottom:.35rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em">Server Name</label>
           <input type="text" id="cfg-PublicName" style="width:100%">
@@ -873,7 +999,7 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
         </div>
       </div>
       <div class="card-title" style="margin-bottom:.85rem">Gameplay Flags</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-bottom:1.5rem">
+      <div class="form-grid form-grid-tight">
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="cfg-PVP"> PvP enabled</label>
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="cfg-SafetySystem"> Safety system</label>
         <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem"><input type="checkbox" id="cfg-Open"> Open (no whitelist)</label>
@@ -885,7 +1011,7 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       <button class="btn-primary" onclick="saveConfig()">Save</button>
       <details style="margin-top:1.5rem">
         <summary style="cursor:pointer;font-size:.9rem;color:var(--muted)">Advanced Options (all remaining servertest.ini keys)</summary>
-        <div id="cfg-advanced-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-top:1rem"></div>
+        <div id="cfg-advanced-grid" class="form-grid form-grid-tight" style="margin:1rem 0 0"></div>
       </details>
     
 
@@ -1001,27 +1127,6 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
       <div id="servers-admin"></div>
           </details>
     </div>
-    <div class="card">
-      <details id="autoupdate-details" open>
-      <summary style="cursor:pointer"><span class="card-title" style="margin-bottom:0">Mod Auto-Update</span></summary>
-      <p style="font-size:.78rem;color:var(--muted);margin:.9rem 0">
-        Checks Steam every hour for updates to installed Workshop items. Updated mods are downloaded, and
-        once the downloads finish the server is restarted to apply them — but only while nobody is connected.
-        If players are online it keeps waiting and retries every few minutes.
-      </p>
-      <div style="display:grid;gap:.7rem;margin-bottom:1rem">
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="autoupdate-enabled" onchange="saveAutoUpdate()"> Check hourly for mod updates
-        </label>
-        <label style="display:flex;align-items:center;gap:.6rem;cursor:pointer;font-size:.875rem">
-          <input type="checkbox" id="autoupdate-restart" onchange="saveAutoUpdate()"> Restart automatically once downloads finish and the server is empty
-        </label>
-      </div>
-      <div id="autoupdate-status" style="font-size:.78rem;color:var(--muted);margin-bottom:.8rem"></div>
-      <button class="btn-secondary btn-sm" onclick="runAutoUpdateNow()">Check now</button>
-      </details>
-    </div>
-
     <div class="card">
       <details open>
 
@@ -1294,10 +1399,12 @@ function switchTab(tab) {
   else { stopLog(); stopManagerLog() }
   if (tab === 'mods') { fetchMods(); fetchCollections(); fetchDependencies(); fetchAudit(); renderModOrder(); startDownloadPoll() }
   if (tab === 'players') fetchPlayers()
-  if (tab === 'settings') { fetchNotifSettings(); fetchAutoUpdate() }
-  if (tab === 'config') { fetchConfig(); fetchSandbox() }
+  if (tab === 'settings') fetchNotifSettings()
+  // Both restart automations now live at the top of Config, so both load with it.
+  if (tab === 'config') { fetchConfig(); fetchSandbox(); fetchSchedule(); fetchAutoUpdate() }
   if (tab === 'backups') fetchBackups()
-  if (tab === 'dashboard') fetchSchedule()
+  // Survives a refresh, and makes a tab linkable — which is how the phone screenshots get taken.
+  if (location.hash !== '#' + tab) history.replaceState(null, '', '#' + tab)
 }
 
 function updateStatus() {
@@ -3175,7 +3282,7 @@ function renderField(f) {
   if (f.default !== null && f.default !== undefined && f.default !== '') hints.push('Default ' + esc(String(f.default)))
   hints.push(f.type)
 
-  return '<div id="fld-' + cid + '" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,260px);gap:1rem;align-items:start;padding:.6rem .75rem;border-left:2px solid ' +
+  return '<div id="fld-' + cid + '" class="sandbox-field" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,260px);gap:1rem;align-items:start;padding:.6rem .75rem;border-left:2px solid ' +
       (err ? '#e74c3c' : (dirty ? 'var(--accent)' : 'transparent')) + ';margin-bottom:.35rem;background:rgba(255,255,255,.015)">' +
     '<div style="min-width:0">' +
       '<div style="font-size:.85rem;font-family:var(--font-mono);word-break:break-word">' + esc(f.key) +
@@ -3270,12 +3377,14 @@ fetchAlerts()
 fetchMods()
 fetchSchedule()
 fetchOnlinePlayers()
+// Open the tab named in the URL, so a refresh (or a bookmark) lands where you left off.
+if (location.hash && ALL_TABS.indexOf(location.hash.slice(1)) !== -1) switchTab(location.hash.slice(1))
 setInterval(function() { if (activeTab === 'dashboard') fetchOnlinePlayers() }, 30000)
 setInterval(updateStatus, 15000)
 setInterval(function() { if (activeTab === 'dashboard') fetchAlerts() }, 120000)
 setInterval(updateSysInfo, 30000)
 setInterval(function() {
-  if (activeTab === 'dashboard') {
+  if (activeTab === 'config') {
     fetch('/api/servertime').then(function(r) { return r.json() }).then(function(d) {
       document.getElementById('sched-server-time').textContent = 'Server time: ' + d.display
     }).catch(function() {})

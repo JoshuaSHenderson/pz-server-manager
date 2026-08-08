@@ -9,7 +9,9 @@ const net = require('net')
 const { prunableItems } = require('./prune')
 const { parseDepList, analyzeDependencies, sortIssues } = require('./deps')
 const { validateReorder } = require('./order')
-const { outdatedItems, seedState, dueForCheck, shouldRestart } = require('./autoupdate')
+const { outdatedItems, seedState, dueForCheck, shouldRestart, shouldDownload } = require('./autoupdate')
+const { readyCheck } = require('./ready')
+const { saveThenGoDown } = require('./save')
 const { makeState: makePlayerState, applyLine: applyPlayerLine, replay: replayPlayerLog, onlineNames: playerNames, parseConnectedCount } = require('./players')
 
 const app = express()
@@ -639,10 +641,21 @@ function mstate(s) {
 const SERVER_READY_MARKER = '*** SERVER STARTED ***'
 const READY_WAIT_MS = 45 * 60 * 1000
 
-function markAwaitingReady(s) {
+// Start waiting for the readiness marker of the run that is about to begin.
+//
+// The run must have started *after* this instant. Callers issue their `docker restart` on the very
+// next line, and a restart takes a few seconds to come back — so for those seconds `docker inspect`
+// still reports the *old* run's StartedAt, and `docker logs --since <that>` still contains the old
+// run's marker. Watching without this floor announced "ready" within seconds of every restart, and
+// measured the wait from the previous boot: on this server that read as 153m 8s.
+//
+// alreadyRunning=true is for the crash monitor, which notices a container that is already back up.
+// There the current run *is* the one to watch, so no floor applies.
+function markAwaitingReady(s, alreadyRunning) {
   const st = mstate(s)
   st.awaitingReady = true
   st.awaitingSince = Date.now()
+  st.readyMinStart = alreadyRunning ? 0 : Date.now()
 }
 
 // Crash monitor
@@ -659,7 +672,7 @@ setInterval(() => {
       }
       // Any transition into running — ours or a crash-restart — starts the wait for readiness.
       // Skipped on the manager's first observation so restarting the manager alone can't fire it.
-      if (st.lastKnownStatus && st.lastKnownStatus !== 'running' && status === 'running') markAwaitingReady(s)
+      if (st.lastKnownStatus && st.lastKnownStatus !== 'running' && status === 'running') markAwaitingReady(s, true)
       st.intentionalStop = false
       st.lastKnownStatus = status
     })
@@ -680,18 +693,17 @@ setInterval(() => {
     exec('docker inspect ' + s.container + ' --format "{{.State.StartedAt}}"', (e1, startedAt) => {
       const since = (startedAt || '').trim()
       if (!since) return
-      exec('docker logs ' + s.container + ' --since ' + since + ' 2>&1 | grep -F ' + JSON.stringify(SERVER_READY_MARKER) + ' | tail -1',
+      // -t so the marker carries the moment it was printed — see ready.js.
+      exec('docker logs -t ' + s.container + ' --since ' + since + ' 2>&1 | grep -F ' + JSON.stringify(SERVER_READY_MARKER) + ' | tail -1',
         { maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
-          if (!(out || '').trim()) return
+          const verdict = readyCheck({ startedAt: since, readyMinStart: st.readyMinStart, markerLine: out })
+          if (!verdict.ready) return
           if (!st.awaitingReady) return   // another tick won the race
           st.awaitingReady = false
-          const secs = Math.round((Date.now() - new Date(since).getTime()) / 1000)
-          const mins = Math.floor(secs / 60)
-          const took = mins ? mins + 'm ' + (secs % 60) + 's' : secs + 's'
-          console.log('[ready] ' + serverLabel(s) + ': accepting players after ' + took)
+          console.log('[ready] ' + serverLabel(s) + ': accepting players after ' + verdict.took)
           const cfg = readNotifConfig()
           if (cfg.enabled && cfg.events && cfg.events.serverReady !== false) {
-            pushoverFor(s, 'PZ Server Ready', 'Finished loading after ' + took + ' — accepting players now.')
+            pushoverFor(s, 'PZ Server Ready', 'Finished loading after ' + verdict.took + ' — accepting players now.')
           }
         })
     })
@@ -942,6 +954,16 @@ function rconCommand(s, command, cb) {
   })
 }
 
+// Every path that takes a container down goes through here — see save.js for why a plain
+// `docker stop` never gets the world written.
+function saveThen(s, next) {
+  saveThenGoDown({
+    rcon: (cmd, cb) => rconCommand(s, cmd, cb),
+    wait: (ms, cb) => setTimeout(cb, ms),
+    log: (m) => console.log('[RCON] ' + s.name + ' ' + m),
+  }, next)
+}
+
 function sendIngameMsg(s, msg) {
   const safe = msg.replace(/"/g, "'")
   rconCommand(s, 'servermsg "' + safe + '"', (err) => {
@@ -995,13 +1017,13 @@ setInterval(() => {
       lastRestartMinute[s.id] = totalNow
       console.log('[Schedule] ' + s.name + ' scheduled restart triggered at', now.toLocaleTimeString())
       mstate(s).intentionalStop = true
-      exec('docker restart ' + s.container, { timeout: 90000 }, (err) => {
+      saveThen(s, () => exec('docker restart ' + s.container, { timeout: 90000 }, (err) => {
         if (err) return console.error('[Schedule] ' + s.name + ' restart failed:', err.message)
         const desc = sched.mode === 'interval'
           ? 'Server restarted on schedule (every ' + sched.intervalHours + 'h).'
           : 'Server restarted on schedule at ' + (parseInt(sched.hour) || 4) + ':' + String(parseInt(sched.minute) || 0).padStart(2, '0')
         pushoverFor(s, 'PZ Scheduled Restart', desc)
-      })
+      }))
     } else if ([10, 5, 1].includes(minutesBefore)) {
       sendIngameMsg(s, 'Server restarting in ' + minutesBefore + ' minute' + (minutesBefore > 1 ? 's' : '') + '!')
     }
@@ -1158,14 +1180,14 @@ app.post('/api/server/stop', (req, res) => {
   const s = srv(req)
   logFor(s, 'stop requested via UI')
   mstate(s).intentionalStop = true
-  exec('docker stop ' + s.container, { timeout: 60000 }, (err) => {
+  saveThen(s, () => exec('docker stop ' + s.container, { timeout: 60000 }, (err) => {
     const ok = !err
     if (ok) {
       const cfg = readNotifConfig()
       if (cfg.enabled && cfg.events && cfg.events.serverStop) pushoverFor(s, 'PZ Server Stopped', 'Project Zomboid server has been stopped.')
     }
     res.json({ success: ok, error: err?.message })
-  })
+  }))
 })
 
 app.post('/api/server/restart', (req, res) => {
@@ -1173,14 +1195,14 @@ app.post('/api/server/restart', (req, res) => {
   logFor(s, 'restart requested via UI')
   mstate(s).intentionalStop = true
   markAwaitingReady(s)
-  exec('docker restart ' + s.container, { timeout: 60000 }, (err) => {
+  saveThen(s, () => exec('docker restart ' + s.container, { timeout: 60000 }, (err) => {
     const ok = !err
     if (ok) {
       const cfg = readNotifConfig()
       if (cfg.enabled && cfg.events && cfg.events.serverStart) pushoverFor(s, 'PZ Server Restarted', 'Project Zomboid server has been restarted.')
     }
     res.json({ success: ok, error: err?.message })
-  })
+  }))
 })
 
 // Warned restart: send in-game countdown messages then restart
@@ -1196,7 +1218,7 @@ app.post('/api/server/warned-restart', (req, res) => {
   })
   setTimeout(() => {
     mstate(s).intentionalStop = true
-    exec('docker restart ' + s.container, { timeout: 90000 }, () => {})
+    saveThen(s, () => exec('docker restart ' + s.container, { timeout: 90000 }, () => {}))
   }, delayMin * 60000)
 })
 
@@ -2174,7 +2196,7 @@ function runAutoUpdate(s) {
       console.log('[autoupdate] ' + serverLabel(s) + ': restarting for ' + cfg.pending.length + ' updated mod(s)')
       mstate(s).intentionalStop = true
       markAwaitingReady(s)
-      exec('docker restart ' + s.container, { timeout: 120000 }, err => {
+      saveThen(s, () => exec('docker restart ' + s.container, { timeout: 120000 }, err => {
         const cur = readAutoUpdate(s)
         if (err) {
           cur.lastResult = 'Restart failed: ' + err.message
@@ -2190,7 +2212,7 @@ function runAutoUpdate(s) {
           pushoverFor(s, 'PZ Mods Auto-Updated', 'Server was empty — restarted to apply updated mods.')
         }
         writeAutoUpdate(s, cur)
-      })
+      }))
       return
     }
     if (cfg.pending.length) cfg.lastResult = 'Waiting to restart: ' + verdict.reason
@@ -2233,6 +2255,15 @@ function runAutoUpdate(s) {
 
       if (!fresh.length) {
         cur.lastResult = cur.pending.length + ' update(s) downloaded — waiting for an empty server to restart.'
+        return writeAutoUpdate(s, cur)
+      }
+
+      // The download is held back on a busy server, not just the restart. It stays in
+      // cur.pending either way, so the next pass over an empty server picks it up.
+      const dl = shouldDownload({ playersOnline: players })
+      if (!dl.download) {
+        cur.lastResult = fresh.length + ' update(s) found — download held: ' + dl.reason
+        console.log('[autoupdate] ' + serverLabel(s) + ': ' + fresh.length + ' mod(s) updated on Steam — download held (' + dl.reason + ')')
         return writeAutoUpdate(s, cur)
       }
 
