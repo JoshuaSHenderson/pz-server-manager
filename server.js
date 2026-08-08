@@ -9,7 +9,7 @@ const net = require('net')
 const { prunableItems } = require('./prune')
 const { parseDepList, analyzeDependencies, sortIssues } = require('./deps')
 const { validateReorder } = require('./order')
-const { outdatedItems, seedState, dueForCheck, shouldRestart } = require('./autoupdate')
+const { outdatedItems, seedState, dueForCheck, shouldRestart, shouldDownload } = require('./autoupdate')
 const { readyCheck } = require('./ready')
 const { makeState: makePlayerState, applyLine: applyPlayerLine, replay: replayPlayerLog, onlineNames: playerNames, parseConnectedCount } = require('./players')
 
@@ -2244,6 +2244,15 @@ function runAutoUpdate(s) {
 
       if (!fresh.length) {
         cur.lastResult = cur.pending.length + ' update(s) downloaded — waiting for an empty server to restart.'
+        return writeAutoUpdate(s, cur)
+      }
+
+      // The download is held back on a busy server, not just the restart. It stays in
+      // cur.pending either way, so the next pass over an empty server picks it up.
+      const dl = shouldDownload({ playersOnline: players })
+      if (!dl.download) {
+        cur.lastResult = fresh.length + ' update(s) found — download held: ' + dl.reason
+        console.log('[autoupdate] ' + serverLabel(s) + ': ' + fresh.length + ' mod(s) updated on Steam — download held (' + dl.reason + ')')
         return writeAutoUpdate(s, cur)
       }
 
