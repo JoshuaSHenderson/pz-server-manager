@@ -738,6 +738,11 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
     <div class="pane-head"><h1>Mods</h1><p>Steam Workshop content installed on the server</p></div>
     <div id="mods-msg"></div>
 
+    <!-- Mods the collection curators dropped. Sits above everything else because it is the one
+         thing on this page the server is actively wrong about: these are still loaded. Renders
+         nothing at all when there is nothing outstanding. -->
+    <div id="dropped-mods"></div>
+
     <!-- Compact activity strip: only visible while something is actually downloading -->
     <div id="download-banner"></div>
 
@@ -2439,7 +2444,66 @@ function addCollection() {
     .finally(function() { btn.disabled = false; btn.textContent = 'Add Collection' })
 }
 
+// --- Mods dropped from their collection ---
+// Syncing no longer deletes these; it records them and this panel is where they get dealt with.
+// Until someone acts, the mods are still on disk and still in Mods=, so the server goes on
+// loading them — which is why the panel leads with that rather than with the list.
+function fetchDroppedMods() {
+  fetch('/api/collections/dropped').then(function(r) { return r.json() }).then(function(d) {
+    renderDroppedMods((d && d.dropped) || [])
+  }).catch(function() {})
+}
+
+function renderDroppedMods(dropped) {
+  var el = document.getElementById('dropped-mods')
+  if (!el) return
+  // Nothing outstanding renders nothing at all — no empty-state card taking up the top of the page.
+  if (!dropped.length) { el.innerHTML = ''; return }
+  var rows = dropped.map(function(m) {
+    var from = m.collectionTitle ? esc(m.collectionTitle) : esc(m.collectionId)
+    return '<tr>' +
+      '<td><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + esc(m.id) + '" target="_blank" class="mono" style="font-size:.78rem">' + esc(m.id) + '</a></td>' +
+      '<td class="text-muted" style="font-size:.78rem">' + from + '</td>' +
+      '<td style="white-space:nowrap">' +
+        '<button class="btn-danger btn-sm" onclick="removeDroppedMod(\'' + esc(m.id) + '\')">Remove</button> ' +
+        '<button class="btn-secondary btn-sm" onclick="keepDroppedMod(\'' + esc(m.id) + '\')">Keep</button>' +
+      '</td></tr>'
+  }).join('')
+  el.innerHTML = '<div class="card" style="margin-bottom:1.4rem;border-left:3px solid #f5a623">' +
+    '<div class="card-title" style="margin-bottom:.5rem">' + dropped.length + ' mod(s) dropped from their collection</div>' +
+    '<p style="font-size:.8rem;color:var(--muted);margin-bottom:.9rem">' +
+      'The curator removed these from the collection that installed them. Nothing was deleted here — they are ' +
+      'still on disk and the server is <strong>still loading them</strong>. Remove the ones you do not want, then ' +
+      'restart to apply. <em>Keep</em> leaves a mod installed and stops it being reported.' +
+    '</p>' +
+    '<table><thead><tr><th>Workshop ID</th><th>Dropped by</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
+    '<div style="display:flex;justify-content:flex-end;margin-top:.9rem">' +
+      '<button class="btn-warn btn-sm" onclick="serverAction(\'restart\')">Restart Server</button>' +
+    '</div></div>'
+}
+
+function removeDroppedMod(id) {
+  if (!confirm('Remove Workshop item ' + id + '?\n\nThe files go now. The server keeps loading it until you restart.')) return
+  fetch('/api/mods/' + id, { method: 'DELETE' })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      showMsg('mods-msg', d.success ? 'Removed ' + id + '. Restart to apply.' : 'Error: ' + d.error, d.success ? 'success' : 'error')
+      fetchDroppedMods(); fetchMods(); fetchDependencies()
+    })
+    .catch(function() { showMsg('mods-msg', 'Could not remove ' + id, 'error') })
+}
+
+// Keeping a mod only clears the report. The files are untouched — this is the "the curator
+// dropped it but I still want it" case, which would otherwise be re-reported on every sync.
+function keepDroppedMod(id) {
+  fetch('/api/collections/dropped/' + id + '/keep', { method: 'POST' })
+    .then(function(r) { return r.json() })
+    .then(function() { fetchDroppedMods() })
+    .catch(function() {})
+}
+
 function fetchCollections() {
+  fetchDroppedMods()
   fetch('/api/collections').then(function(r) { return r.json() }).then(function(d) {
     renderCollections(d.collections || [])
   }).catch(function() {})
@@ -2484,10 +2548,9 @@ function renderCollections(colls) {
         '<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + c.id + '" target="_blank" class="mono" style="font-size:.72rem;opacity:.7">' + c.id + '</a>' + nested + '</td>' +
       '<td>' + health + '<br><span style="font-size:.72rem;color:var(--muted)">installed</span></td>' +
       '<td class="text-muted" style="font-size:.76rem">' + synced + '</td>' +
-      '<td><label style="display:flex;align-items:center;gap:.4rem;font-size:.75rem;cursor:pointer' + (c.prune ? '' : ';opacity:.6') + '" ' +
-          'title="On sync, also remove mods this collection no longer lists. Mods another tracked collection still owns are never removed.">' +
-        '<input type="checkbox"' + (c.prune ? ' checked' : '') +
-        ' onchange="setCollectionPrune(this, \'' + c.id + '\')"> ' + (c.prune ? 'on' : 'off') + '</label></td>' +
+      '<td>' + (c.droppedItems && c.droppedItems.length
+        ? '<span style="color:#f5a623;font-size:.78rem">' + c.droppedItems.length + ' awaiting removal</span>'
+        : '<span class="text-muted" style="font-size:.78rem">—</span>') + '</td>' +
       '<td style="white-space:nowrap">' +
         '<button class="btn-secondary btn-sm" onclick="syncCollection(\'' + c.id + '\')">Sync</button> ' +
         '<button class="btn-danger btn-sm" onclick="removeCollection(\'' + c.id + '\')">Remove</button>' +
@@ -2501,43 +2564,13 @@ function renderCollections(colls) {
   }
   document.getElementById('collections-table').innerHTML =
     '<table><thead><tr>' + cth('title', 'Collection') + cth('missing', 'Mods') + cth('synced', 'Last Synced') +
-    '<th title="Remove mods the curator has dropped from this collection when it syncs">Remove dropped</th>' +
+    '<th title="Mods the curator dropped that are still installed here. Syncing reports them; it never deletes them.">Dropped</th>' +
     '<th></th></tr></thead><tbody>' + rows + '</tbody></table>'
 }
 
-// Turning prune ON is the destructive direction, so that's what gets confirmed — turning it off
-// only makes future syncs additive and needs no warning.
-function setCollectionPrune(cb, id) {
-  var want = cb.checked
-  if (want && !confirm('Remove dropped mods for this collection?\n\nFrom now on, syncing it also DELETES mods its curator has removed. Mods another tracked collection still owns are kept.\n\nNothing is deleted until the next sync.')) {
-    cb.checked = false
-    return
-  }
-  cb.disabled = true
-  fetch('/api/collections/' + id + '/prune', {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prune: want })
-  })
-    .then(function(r) { return r.json() })
-    .then(function(d) {
-      if (!d.success) throw new Error(d.error || 'unknown error')
-      showMsg('mods-msg', want
-        ? 'Syncing this collection will now remove mods dropped from it.'
-        : 'Syncing this collection will keep dropped mods.', 'success', 5000)
-      fetchCollections()
-    })
-    .catch(function(e) {
-      cb.checked = !want // nothing was stored, so put the box back
-      showMsg('mods-msg', 'Could not update: ' + e.message, 'error', 0)
-    })
-    .finally(function() { cb.disabled = false })
-}
-
+// Syncing is additive and needs no confirmation — it installs what is new and reports what the
+// curator dropped, but never deletes.
 function syncCollection(id) {
-  // Prune deletes mod files, so re-confirm at the point it would actually happen.
-  var c = (cachedCollections || []).find(function(x) { return x.id === id }) || {}
-  var prune = !!c.prune
-  if (prune && !confirm('Sync collection ' + id + ' and REMOVE any mods the curator has dropped from it?\n\nMod files are deleted. Mods shared with another tracked collection are kept.')) return
   showMsg('mods-msg', 'Syncing collection ' + id + '...', 'info', 0)
   fetch('/api/collections/' + id + '/sync', { method: 'POST' })
     .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
@@ -2545,9 +2578,9 @@ function syncCollection(id) {
       if (!x.ok) throw new Error(x.d.error || 'Sync failed')
       var bits = []
       if (x.d.queued) bits.push('queued ' + x.d.queued + ' new/missing mod(s)')
-      if (x.d.pruned) bits.push('removed ' + x.d.pruned + ' dropped mod(s): ' + (x.d.prunedIds || []).join(', '))
+      if (x.d.dropped) bits.push(x.d.dropped + ' mod(s) dropped by the curator and still installed — remove them above')
       showMsg('mods-msg', bits.length
-        ? 'Sync ' + bits.join(', ') + '. Restart to apply.'
+        ? 'Sync: ' + bits.join('; ') + '. Restart to apply.'
         : 'Already up to date — all ' + x.d.total + ' mod(s) present.', 'success', 10000)
       fetchCollections(); fetchDownloads(); fetchMods()
     })
@@ -2558,24 +2591,18 @@ function syncAllCollections() {
   fetch('/api/collections').then(function(r) { return r.json() }).then(function(d) {
     var colls = d.collections || []
     if (!colls.length) return showMsg('mods-msg', 'No collections to sync.', 'info', 4000)
-    // One confirm for the whole batch, naming only the collections set to prune.
-    var pruning = colls.filter(function(c) { return c.prune })
-    if (pruning.length && !confirm('Sync all ' + colls.length + ' collection(s)?\n\n' + pruning.length +
-        ' of them will also REMOVE mods their curators have dropped:\n  ' +
-        pruning.map(function(c) { return c.title || c.id }).join('\n  ') +
-        '\n\nMod files are deleted. Mods shared with another tracked collection are kept.')) return
     showMsg('mods-msg', 'Syncing ' + colls.length + ' collection(s)...', 'info', 0)
-    var done = 0, queued = 0, pruned = 0
+    var done = 0, queued = 0, dropped = 0
     colls.forEach(function(c) {
       fetch('/api/collections/' + c.id + '/sync', { method: 'POST' })
         .then(function(r) { return r.json() })
-        .then(function(x) { queued += (x.queued || 0); pruned += (x.pruned || 0) })
+        .then(function(x) { queued += (x.queued || 0); dropped += (x.dropped || 0) })
         .catch(function() {})
         .finally(function() {
           if (++done === colls.length) {
             var bits = []
             if (queued) bits.push('queued ' + queued + ' new/missing mod(s)')
-            if (pruned) bits.push('removed ' + pruned + ' dropped mod(s)')
+            if (dropped) bits.push(dropped + ' dropped mod(s) awaiting removal')
             showMsg('mods-msg', bits.length ? 'Sync complete — ' + bits.join(', ') + '. Restart to apply.' : 'All collections already up to date.', 'success', 8000)
             fetchCollections(); fetchDownloads(); fetchMods()
           }
@@ -2600,7 +2627,7 @@ function saveAutoSync() {
   fetch('/api/collections/autosync', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled, intervalHours: intervalHours }) })
     .then(function(r) { return r.json() })
     .then(function() {
-      // Whether a sync prunes is per-collection now, so it isn't mentioned here.
+      // Auto-sync only ever installs and reports, so there is no destructive caveat to add here.
       showMsg('mods-msg', enabled ? 'Auto-sync on — checking every ' + intervalHours + 'h.' : 'Auto-sync off.', 'success', 4000)
     })
     .catch(function() {})
@@ -2612,7 +2639,8 @@ function removeMod(workshopId) {
     .then(function(r) { return r.json() })
     .then(function(d) {
       showMsg('mods-msg', d.success ? 'Removed ' + workshopId + '. Restart to apply.' : 'Error: ' + d.error, d.success ? 'success' : 'error')
-      fetchMods(); fetchDependencies()
+      // Removing a mod here may also settle a dropped-mod row, so refresh that panel too.
+      fetchMods(); fetchDependencies(); fetchDroppedMods()
     })
 }
 
