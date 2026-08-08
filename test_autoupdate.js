@@ -1,6 +1,6 @@
 // Run: node test_autoupdate.js
 const assert = require('assert')
-const { outdatedItems, seedState, dueForCheck, shouldRestart } = require('./autoupdate')
+const { outdatedItems, seedState, dueForCheck, shouldRestart, shouldDownload } = require('./autoupdate')
 
 // --- outdatedItems ---
 // The rule that stops enabling the feature from re-downloading every installed mod: an id we have
@@ -59,5 +59,18 @@ assert.match(shouldRestart(Object.assign({}, base, { activeDownloads: 1 })).reas
 // Empty input must not throw.
 assert.strictEqual(shouldRestart().restart, false)
 assert.strictEqual(shouldRestart({}).restart, false)
+
+// --- shouldDownload: the bandwidth spike must not land on people who are playing ---
+assert.strictEqual(shouldDownload({ playersOnline: 0 }).download, true)
+assert.strictEqual(shouldDownload({ playersOnline: 1 }).download, false)
+assert.strictEqual(shouldDownload({ playersOnline: 5 }).download, false)
+
+// Same rule as shouldRestart: unknown is never read as empty.
+assert.strictEqual(shouldDownload({ playersOnline: null }).download, false)
+assert.strictEqual(shouldDownload({ playersOnline: undefined }).download, false)
+assert.strictEqual(shouldDownload({}).download, false)
+assert.strictEqual(shouldDownload().download, false)
+assert.match(shouldDownload({ playersOnline: null }).reason, /unknown/)
+assert.match(shouldDownload({ playersOnline: 2 }).reason, /2 player\(s\) online/)
 
 console.log('autoupdate: all assertions passed')

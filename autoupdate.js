@@ -54,4 +54,29 @@ function shouldRestart(o) {
   return { restart: true, reason: 'updates downloaded and server empty' }
 }
 
-module.exports = { outdatedItems, seedState, dueForCheck, shouldRestart }
+// Downloading is gated on an empty server for the same reason restarting is.
+//
+// A Workshop download is hundreds of MB pulled at line speed. On a home
+// connection that fills the WAN queue, and every player crossing it sees
+// their latency jump — which in this game reads as "I can't get in the car"
+// and "the door won't open", because those are server-authoritative actions
+// that need a round trip, while client-predicted walking carries on looking
+// fine. Anyone on the LAN notices nothing at all, which is what makes it
+// look like the server rather than the link.
+//
+// Waiting costs nothing: shouldRestart() will not apply the update until the
+// server is empty anyway, so downloading early only moves the disruption
+// earlier — it never makes the mod live any sooner.
+function shouldDownload(o) {
+  o = o || {}
+  // Same rule as shouldRestart: not knowing is treated as "someone is on".
+  if (o.playersOnline === null || o.playersOnline === undefined) {
+    return { download: false, reason: 'player count unknown' }
+  }
+  if (o.playersOnline > 0) {
+    return { download: false, reason: o.playersOnline + ' player(s) online — waiting for an empty server' }
+  }
+  return { download: true, reason: 'server empty' }
+}
+
+module.exports = { outdatedItems, seedState, dueForCheck, shouldRestart, shouldDownload }
