@@ -6,7 +6,7 @@ const https = require('https')
 const querystring = require('querystring')
 const crypto = require('crypto')
 const net = require('net')
-const { prunableItems } = require('./prune')
+const { droppedItems } = require('./prune')
 const { parseDepList, analyzeDependencies, sortIssues } = require('./deps')
 const { validateReorder } = require('./order')
 const { outdatedItems, seedState, dueForCheck, shouldRestart, shouldDownload } = require('./autoupdate')
@@ -1834,8 +1834,9 @@ app.post('/api/mods/enabled', (req, res) => {
 })
 
 // The one removal path for a Workshop item: delete the copied mod folders, then drop the item
-// from WorkshopItems= and its mod ids from Mods=. Manual removal, collection removal and
-// collection prune all route through here so they can't drift apart.
+// from WorkshopItems= and its mod ids from Mods=. Manual removal, untracking a collection with
+// removeMods, and clearing a dropped mod all route through here so they can't drift apart.
+// Nothing removes a mod on a timer — a sync only ever reports what the curator dropped.
 function removeWorkshopItem(s, workshopId) {
   const removedIds = modIdsFromWorkshop(s, workshopId)
   const removedFolders = modNamesFromWorkshop(s, workshopId)
@@ -1854,6 +1855,18 @@ app.delete('/api/mods/:workshopId', (req, res) => {
   const { removedIds, removedFolders } = removeWorkshopItem(s, workshopId)
   logFor(s, 'removed Workshop item ' + workshopId + ' - mod ids [' + removedIds.join(', ') + '], folders [' + removedFolders.join(', ') + ']')
   writeQueue(s, readQueue(s).filter(e => e.id !== workshopId))
+  // Whatever the reason for removal, it is no longer outstanding. Clearing it here rather than
+  // waiting for the next sync is what makes the "remove it" button in the dropped-mods panel
+  // settle immediately instead of leaving a row that looks like it did nothing.
+  const colls = readCollections(s)
+  let clearedDropped = false
+  for (const c of colls) {
+    if (c.droppedItems && c.droppedItems.includes(workshopId)) {
+      c.droppedItems = c.droppedItems.filter(id => id !== workshopId)
+      clearedDropped = true
+    }
+  }
+  if (clearedDropped) writeCollections(s, colls)
   res.json({ success: true, workshopId, removedIds, removedFolders })
 })
 
@@ -2409,6 +2422,17 @@ app.get('/api/alerts', (req, res) => {
     }
   }
 
+  // Mods the curators dropped. Nothing was deleted, so this is the nudge to act: the mods are
+  // still loaded and will stay loaded until they are removed and the server restarts.
+  try {
+    const dropped = allDroppedItems(s)
+    if (dropped.length) {
+      push('warn', 'collections', dropped.length + ' mod(s) dropped from collections — remove and restart',
+        'Still installed and loading: ' + dropped.map(d => d.id).join(', ') +
+        '. Remove them in Mods, then restart the server to apply.', { tab: 'mods' })
+    }
+  } catch (e) {}
+
   // Downloads: failures, and what changed recently
   const queue = readQueue(s)
   const failed = queue.filter(e => e.status === 'failed')
@@ -2456,40 +2480,43 @@ app.get('/api/collections', (req, res) => {
 
 // Install (or re-install) a collection: resolves nested collections down to real mod items,
 // records it in the registry, and queues anything not already present.
-// opts.prune also removes items the collection no longer lists — mods the curator dropped since
-// the last sync. Off by default: syncing is otherwise purely additive, and deleting a mod is not
-// something to do as a silent side effect of "check for updates".
-function installCollection(s, collectionId, opts, cb) {
-  if (typeof opts === 'function') { cb = opts; opts = {} }
-  const prune = !!(opts && opts.prune)
+//
+// Syncing is purely additive. Mods the curator has dropped are recorded on the registry entry
+// and surfaced — in the Mods tab and as an alert — but never deleted here. Deleting one out from
+// under a running server desyncs every connected client, and a mod vanishing as a silent side
+// effect of "check for updates" is indistinguishable from the server eating someone's save. The
+// operator removes them and restarts when it suits them.
+function installCollection(s, collectionId, cb) {
   resolveCollectionLeaves(collectionId, (err, leaves, nested) => {
     if (err) return cb(err)
     getTitles([collectionId], titles => {
       // Captured before the upsert overwrites it — this is what the collection used to contain.
       const existing = readCollections(s).find(c => c.id === collectionId)
       const previous = (existing && existing.items) || []
-      const have = new Set(getIniList(s, 'WorkshopItems'))
+      const installed = getIniList(s, 'WorkshopItems')
+      const have = new Set(installed)
       const todo = leaves.filter(id => !have.has(id) || !hasModContent(s, id))
+      const dropped = droppedItems({
+        knownDropped: (existing && existing.droppedItems) || [],
+        previous,
+        leaves,
+        otherCollections: readCollections(s).filter(c => c.id !== collectionId),
+        installed
+      })
       upsertCollection(s, {
         id: collectionId,
         title: titles[collectionId] || '',
         items: leaves,
         nestedCollections: nested || [],
+        droppedItems: dropped,
         lastSynced: new Date().toISOString()
       })
-      let pruned = []
-      if (prune && previous.length) {
-        // Never yank a mod another tracked collection still owns — same rule as untracking.
-        pruned = prunableItems(previous, leaves, readCollections(s).filter(c => c.id !== collectionId))
-        for (const wid of pruned) removeWorkshopItem(s, wid)
-        if (pruned.length) writeQueue(s, readQueue(s).filter(e => !pruned.includes(e.id)))
-      }
-      if (pruned.length) logFor(s, 'collection ' + collectionId + ': pruned ' + pruned.length + ' dropped mod(s) [' + pruned.join(', ') + ']')
+      if (dropped.length) logFor(s, 'collection ' + collectionId + ': ' + dropped.length + ' dropped mod(s) still installed, awaiting removal [' + dropped.join(', ') + ']')
       logFor(s, 'collection ' + collectionId + ' synced: ' + leaves.length + ' item(s), ' + todo.length + ' to download')
       if (todo.length) steamcmdDownload(s, todo, 'collection', collectionId)
       cb(null, {
         total: leaves.length, queued: todo.length, nested: (nested || []).length,
-        pruned: pruned.length, prunedIds: pruned
+        dropped: dropped.length, droppedIds: dropped
       })
     })
   })
@@ -2510,31 +2537,40 @@ app.post('/api/collections/:id/sync', (req, res) => {
   const s = srv(req)
   const { id } = req.params
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid collection id' })
-  // An explicit ?prune= wins; otherwise use whatever this collection is configured to do.
-  const entry = readCollections(s).find(c => c.id === id)
-  const prune = req.query.prune !== undefined
-    ? String(req.query.prune) === 'true'
-    : !!(entry && entry.prune)
-  installCollection(s, id, { prune }, (err, r) => {
+  installCollection(s, id, (err, r) => {
     if (err) return res.status(502).json({ error: 'Sync failed', detail: err.message })
     res.json(Object.assign({ success: true, collectionId: id }, r))
   })
 })
 
-// Per-collection prune setting: whether syncing this collection also removes mods its curator has
-// dropped. Stored on the registry entry so manual syncs and auto-sync agree, and so one collection
-// can prune while another stays additive.
-app.put('/api/collections/:id/prune', (req, res) => {
+// Every mod the curators have dropped, across every tracked collection, that is still installed.
+// One flat list because that is how it gets acted on: remove them, then restart once.
+function allDroppedItems(s) {
+  const seen = new Set()
+  const out = []
+  for (const c of readCollections(s)) {
+    for (const id of (c.droppedItems || [])) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      out.push({ id, collectionId: c.id, collectionTitle: c.title || '' })
+    }
+  }
+  return out
+}
+
+app.get('/api/collections/dropped', (req, res) => res.json({ dropped: allDroppedItems(srv(req)) }))
+
+// Clear an id from every collection's dropped list without touching the files. For the case where
+// the operator decides to keep a mod the curator dropped — otherwise every sync re-reports it.
+app.post('/api/collections/dropped/:workshopId/keep', (req, res) => {
   const s = srv(req)
-  const { id } = req.params
-  const { prune } = req.body || {}
-  if (typeof prune !== 'boolean') return res.status(400).json({ error: 'prune must be a boolean' })
+  const { workshopId } = req.params
   const list = readCollections(s)
-  const entry = list.find(c => c.id === id)
-  if (!entry) return res.status(404).json({ error: 'Collection not tracked: ' + id })
-  entry.prune = prune
+  for (const c of list) {
+    if (c.droppedItems) c.droppedItems = c.droppedItems.filter(id => id !== workshopId)
+  }
   writeCollections(s, list)
-  res.json({ success: true, id, prune })
+  res.json({ success: true, id: workshopId })
 })
 
 // Stop tracking a collection. Mods it installed are left in place unless removeMods is set.
@@ -2596,15 +2632,16 @@ setInterval(() => {
     writeAutoSync(s, cfg)
     console.log('[autosync] ' + s.name + ': syncing ' + list.length + ' collection(s)')
     let queuedTotal = 0
-    let prunedTotal = 0
+    let droppedTotal = 0
     let pending = list.length
     for (const c of list) {
-      installCollection(s, c.id, { prune: !!c.prune }, (err, r) => {
-        if (!err && r) { queuedTotal += r.queued; prunedTotal += r.pruned || 0 }
-        if (--pending <= 0 && (queuedTotal > 0 || prunedTotal > 0)) {
+      installCollection(s, c.id, (err, r) => {
+        if (!err && r) { queuedTotal += r.queued; droppedTotal += r.dropped || 0 }
+        if (--pending <= 0 && (queuedTotal > 0 || droppedTotal > 0)) {
           const parts = []
           if (queuedTotal) parts.push('queued ' + queuedTotal + ' new/missing mod(s)')
-          if (prunedTotal) parts.push('removed ' + prunedTotal + ' mod(s) dropped from their collection')
+          // Deliberately worded as an outstanding task, not a completed one — nothing was removed.
+          if (droppedTotal) parts.push('found ' + droppedTotal + ' mod(s) dropped from their collection, still installed — remove them and restart')
           pushoverFor(s, 'PZ Collection Sync', 'Auto-sync ' + parts.join(' and ') + '.')
         }
       })
