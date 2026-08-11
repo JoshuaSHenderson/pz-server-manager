@@ -2166,9 +2166,12 @@ function activeDownloadCount(s, cb) {
   })
 }
 
-function runAutoUpdate(s) {
+// force=true is the manual "Check now" button: it runs the pass even while the hourly check is
+// switched off. Restarting is not forced with it — that still goes through shouldRestart(), which
+// refuses whenever auto-update is disabled.
+function runAutoUpdate(s, force) {
   const cfg = readAutoUpdate(s)
-  if (!cfg.enabled) return
+  if (!cfg.enabled && !force) return
 
   const finish = () => writeAutoUpdate(s, cfg)
 
@@ -2287,14 +2290,14 @@ app.put('/api/mods/autoupdate', (req, res) => {
   res.json({ success: true, enabled: cfg.enabled, restartWhenEmpty: cfg.restartWhenEmpty })
 })
 
-// Runs the whole pass immediately, for testing the setup without waiting for the hourly tick.
+// Checks Steam now and downloads anything outdated, whether or not the hourly check is enabled.
+// With auto-update off this downloads only — shouldRestart() will not restart the server.
 app.post('/api/mods/autoupdate/check', (req, res) => {
   const s = srv(req)
   const cfg = readAutoUpdate(s)
-  if (!cfg.enabled) return res.status(400).json({ error: 'Auto-update is disabled' })
   cfg.lastCheck = null // force the Steam call regardless of when the last one ran
   writeAutoUpdate(s, cfg)
-  runAutoUpdate(s)
+  runAutoUpdate(s, true)
   res.json({ success: true, message: 'Check started — results appear here within a few seconds.' })
 })
 
