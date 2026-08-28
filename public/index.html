@@ -794,6 +794,8 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
     <div id="mods-deps"></div>
     <div id="mods-audit"></div>
     <div id="mods-order"></div>
+    <div id="mods-reinstall"></div>
+    <div id="mods-excludes"></div>
 
     <div class="card">
       <details id="installed-details" open ontoggle="panelOpen.installed = this.open">
@@ -1668,6 +1670,8 @@ function fetchMods() {
     cachedMods = d.mods || []
     renderModsTable(cachedMods)
   })
+  fetchExcludes()
+  fetchReinstall()
 }
 
 // "Build 41"/"Build 42" ride along on almost every Workshop item, so they're noise for grouping
@@ -1827,7 +1831,9 @@ function renderModsTable(mods) {
       '<td style="max-width:200px">' + tagHtml + '</td>' +
       '<td>' + coll + '</td>' +
       '<td>' + statusHtml + '</td>' +
-      '<td><button class="btn-danger btn-sm" onclick="removeMod(\'' + m.workshopId + '\')">Remove</button></td>' +
+      '<td style="white-space:nowrap">' +
+        '<button class="btn-secondary btn-sm" title="Delete this item and download it again from Steam" onclick="reinstallMod(\'' + m.workshopId + '\')">Reinstall</button> ' +
+        '<button class="btn-danger btn-sm" onclick="removeMod(\'' + m.workshopId + '\')">Remove</button></td>' +
       '</tr>'
   }).join('')
 
@@ -2631,6 +2637,169 @@ function saveAutoSync() {
       showMsg('mods-msg', enabled ? 'Auto-sync on — checking every ' + intervalHours + 'h.' : 'Auto-sync off.', 'success', 4000)
     })
     .catch(function() {})
+}
+
+// --- Excluded mod folders, and duplicate mod ids ---
+//
+// One Workshop item can ship several mod folders, and two of them can declare the same mod id.
+// PZ then loads whichever it scans first, so the server comes up differently on consecutive
+// restarts. Nothing else in this UI can show that: the mods table is keyed by mod id, and the
+// colliding folders collapse into one row. This panel is folder-level on purpose.
+function fetchExcludes() {
+  fetch('/api/mods/excludes').then(function(r) { return r.json() }).then(function(d) {
+    renderExcludes(d.duplicates || [], d.excludes || {})
+  }).catch(function() {})
+}
+
+function renderExcludes(duplicates, excludes) {
+  var el = document.getElementById('mods-excludes')
+  if (!el) return
+  var html = ''
+
+  if (duplicates.length) {
+    html += '<div class="card"><div class="card-title" style="color:#e74c3c">' +
+      duplicates.length + ' mod ID' + (duplicates.length > 1 ? 's are' : ' is') + ' claimed by more than one folder</div>' +
+      '<p class="text-muted" style="font-size:.82rem;margin:.2rem 0 .9rem">' +
+      'The server loads whichever folder it scans first, so it boots differently each restart. ' +
+      'Exclude the folder you do not want and it stays gone through every future download.</p>'
+    html += duplicates.map(function(d) {
+      return '<div style="margin-bottom:.8rem">' +
+        '<div class="mono" style="font-size:.85rem;margin-bottom:.35rem">' + esc(d.modId) + '</div>' +
+        d.providers.map(function(p) {
+          return '<div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin:.2rem 0 .2rem 1rem">' +
+            '<span class="mono" style="font-size:.76rem">' + esc(p.workshopId) + ' / ' + esc(p.folder) + '</span>' +
+            '<button class="btn-secondary btn-sm" onclick="excludeFolder(decodeURIComponent(\'' + encodeURIComponent(p.workshopId) + '\'), decodeURIComponent(\'' + encodeURIComponent(p.folder) + '\'))">Exclude this folder</button>' +
+            '</div>'
+        }).join('') +
+        '</div>'
+    }).join('')
+    html += '</div>'
+  }
+
+  var rows = []
+  Object.keys(excludes).forEach(function(wid) {
+    (excludes[wid] || []).forEach(function(folder) { rows.push({ workshopId: wid, folder: folder }) })
+  })
+  if (rows.length) {
+    html += '<div class="card"><div class="card-title">Excluded mod folders</div>' +
+      '<p class="text-muted" style="font-size:.82rem;margin:.2rem 0 .9rem">' +
+      'Deleted again after every download and before every start. Removing an entry here does not ' +
+      'bring the folder back, it returns on the next download or reinstall of that item.</p>' +
+      rows.map(function(r) {
+        return '<div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin:.25rem 0">' +
+          '<span class="mono" style="font-size:.78rem">' + esc(r.workshopId) + ' / ' + esc(r.folder) + '</span>' +
+          '<button class="btn-secondary btn-sm" onclick="unexcludeFolder(decodeURIComponent(\'' + encodeURIComponent(r.workshopId) + '\'), decodeURIComponent(\'' + encodeURIComponent(r.folder) + '\'))">Stop excluding</button>' +
+          '</div>'
+      }).join('') + '</div>'
+  }
+
+  el.innerHTML = html
+}
+
+function excludeFolder(workshopId, folder, force) {
+  if (!force && !confirm('Exclude "' + folder + '" from Workshop item ' + workshopId + '?\n\n' +
+    'Its files are deleted now and after every future download. Restart the server to apply.')) return
+  fetch('/api/mods/excludes', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workshopId: workshopId, folder: folder, force: !!force })
+  })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(res) {
+      // 409 means the exclusion would leave a mod enabled in Mods= with nothing to load. That is
+      // the state that makes PZ drop the mod's items from the save, so it is confirmed explicitly
+      // rather than waved through.
+      if (!res.ok && res.d.orphaned) {
+        if (confirm(res.d.error + '\n\nExclude it anyway?')) return excludeFolder(workshopId, folder, true)
+        return
+      }
+      if (!res.ok) throw new Error(res.d.error || 'unknown error')
+      showMsg('mods-msg', 'Excluded ' + folder + '. Removed ' + (res.d.removed || []).length + ' copy(ies). Restart the server to apply.', 'success', 8000)
+      fetchExcludes(); fetchMods(); fetchAudit()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Error: ' + e.message, 'error') })
+}
+
+function unexcludeFolder(workshopId, folder) {
+  if (!confirm('Stop excluding "' + folder + '"?\n\nThe folder is not restored now, it comes back the next time this item downloads.')) return
+  fetch('/api/mods/excludes', {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workshopId: workshopId, folder: folder })
+  })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.success) throw new Error(d.error || 'unknown error')
+      showMsg('mods-msg', 'No longer excluding ' + folder + '.', 'success', 6000)
+      fetchExcludes()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Error: ' + e.message, 'error') })
+}
+
+// --- Clean reinstall ---
+//
+// Long-running, and it takes the server down partway through, so the button only starts it and
+// everything after that is read back from GET /api/mods/reinstall.
+var reinstallPoll = null
+
+function reinstallMod(workshopId) {
+  if (!confirm('Reinstall Workshop item ' + workshopId + ' from Steam?\n\n' +
+    'The server keeps running during the download, then stops while the files are swapped and ' +
+    'starts again. The old files are kept so a failure can be rolled back.\n\n' +
+    'Do this with nobody connected.')) return
+  fetch('/api/mods/' + workshopId + '/reinstall', { method: 'POST' })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(res) {
+      if (!res.ok) throw new Error(res.d.error || 'unknown error')
+      showMsg('mods-msg', 'Reinstalling ' + workshopId + '...', 'info', 6000)
+      pollReinstall()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Error: ' + e.message, 'error') })
+}
+
+function pollReinstall() {
+  if (reinstallPoll) clearInterval(reinstallPoll)
+  fetchReinstall()
+  reinstallPoll = setInterval(fetchReinstall, 5000)
+}
+
+function fetchReinstall() {
+  fetch('/api/mods/reinstall').then(function(r) { return r.json() }).then(function(d) {
+    var el = document.getElementById('mods-reinstall')
+    if (!el) return
+    var st = d.state
+    if (!st) { el.innerHTML = ''; return }
+
+    if (d.busy) {
+      el.innerHTML = '<div class="card"><div class="card-title">Reinstalling ' + esc(st.workshopId) + '</div>' +
+        '<div style="font-size:.85rem">' + esc(st.step) + '...</div>' +
+        '<p class="text-muted" style="font-size:.78rem;margin-top:.5rem">' +
+        'Scheduled restarts and mod auto-updates are paused until this finishes.</p></div>'
+      if (!reinstallPoll) pollReinstall()
+      return
+    }
+
+    if (reinstallPoll) { clearInterval(reinstallPoll); reinstallPoll = null }
+
+    if (st.ok) {
+      el.innerHTML = '<div class="card"><div class="card-title" style="color:#2ecc71">Reinstalled ' + esc(st.workshopId) + '</div>' +
+        '<div style="font-size:.85rem">Files replaced and the server is starting.' +
+        ((st.addedModIds || []).length ? ' New mod id(s) added to the end of the load order: ' + esc(st.addedModIds.join(', ')) + '.' : '') +
+        '</div></div>'
+      return
+    }
+
+    // The one outcome that needs a person: the swap failed and could not be undone, so the server
+    // is stopped on purpose rather than booting a world whose Mods= names files that are not there.
+    var stranded = st.strandedDown
+    el.innerHTML = '<div class="card"><div class="card-title" style="color:#e74c3c">' +
+      (stranded ? 'Reinstall failed, server deliberately left stopped' : 'Reinstall of ' + esc(st.workshopId) + ' failed') + '</div>' +
+      '<div style="font-size:.85rem">' + esc(st.error || 'unknown error') + '</div>' +
+      (stranded
+        ? '<p style="font-size:.82rem;margin-top:.6rem">Starting the server now would load the world without this mod, which permanently removes its items from every character and container. ' +
+          'The old files are in <span class="mono">' + esc(st.quarantine || '') + '</span> and must be restored before starting.</p>'
+        : '<p class="text-muted" style="font-size:.82rem;margin-top:.6rem">' +
+          (st.rolledBack ? 'Rolled back, and the server is starting again.' : 'The server was not stopped and nothing changed.') + '</p>') +
+      '</div>'
+  }).catch(function() {})
 }
 
 function removeMod(workshopId) {

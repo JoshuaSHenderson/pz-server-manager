@@ -8,7 +8,7 @@ Built with Node.js + Express. Runs as a sidecar Docker container alongside the P
 
 - **Dashboard** — server status, live player count, every manual action (Start / Stop / Restart, warned restarts), CPU / Memory / Disk stats
 - **Config** — **Restarts & Updates** in one place at the top, then the server's own `servertest.ini` settings and sandbox options
-- **Mods** — install mods by Steam Workshop ID, remove mods, live download progress tracking
+- **Mods** — install mods by Steam Workshop ID, remove mods, live download progress tracking, exclude individual mod folders, and reinstall one Workshop item cleanly
 - **Players** — whitelist management, access level control, ban/unban
 - **Logs** — live streaming server logs with filter and keyword coloring
 - **Settings** — Pushover push notifications and Discord status card
@@ -101,12 +101,42 @@ The PZ server log and the manager's own log as separate streams, each with indep
 
 ![Logs tab](docs/screenshots/06-logs.png)
 
+### Duplicate mod IDs, and excluded folders
+
+A Workshop item can ship several mod folders, and two of them can declare the same `id=` in their
+`mod.info`. PZ loads whichever it scans first, so the server comes up differently on consecutive
+restarts — the "it needed a second restart" symptom, invisible everywhere else because the mods
+table is keyed by mod id and the colliding folders collapse into one row.
+
+The Mods tab flags those collisions and offers to exclude the folder you don't want. An exclusion
+is not a one-time delete: Steam re-ships the folder on every download, so it is reapplied after
+each download and before each start. Excluding the only folder that provides an *enabled* mod id
+is refused, because a server that boots without a mod is what strips that mod's items out of the
+save.
+
+### Reinstall
+
+Replaces one Workshop item's files with a fresh copy from Steam. The download runs with the
+server still up — SteamCMD lives inside the PZ container — and only the file swap is downtime:
+save over RCON, stop, move the old files aside, mirror the new ones out, restore `Mods=` in its
+original order, verify every enabled mod id still has files on disk, start.
+
+If verification fails the old files are moved back and the server starts again. If even that
+fails, the server is deliberately left stopped and a notification is sent: booting a world whose
+`Mods=` names files that aren't there permanently deletes those mods' items from every character
+and container, and downtime is the recoverable half of that trade. Scheduled restarts and mod
+auto-updates are paused for the duration.
+
+Note that a reinstall does not fix a duplicate mod id — Steam ships the same folders again. That
+is what exclusions are for.
+
 ## Requirements
 
 - Docker with access to the host socket (`/var/run/docker.sock`)
 - PZ server container named `zomboid`
 - PZ data volume mounted at `/pz-data`
 - PZ workshop volume mounted at `/workshop`
+- PZ install dir (SteamCMD's `force_install_dir`) mounted at `/pz-install` — optional, required only for **Reinstall**
 
 ## Setup
 
@@ -123,6 +153,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./workshop:/workshop
       - ./data:/pz-data
+      - ./install:/pz-install
     environment:
       - TZ=America/New_York
     restart: unless-stopped
@@ -169,6 +200,8 @@ mod-manager/
 - Player event logs at `/pz-data/Logs/*_user.txt` (PZ B41 format)
 - Workshop content at `/workshop/content/108600/`
 - When installing mods via UI, SteamCMD downloads to `pz-dedicated/` dir inside the PZ container — manager copies to the mounted Steam workshop path automatically
+- `/pz-install` is that same `pz-dedicated/` tree, and it is the one the game actually loads from. Without it mounted, everything works except **Reinstall**, which is refused rather than run half-blind
+- Excluded mod folders in `/pz-data/mod-excludes.json`; pre-reinstall copies in `/pz-data/backups/mod-reinstall/`
 
 ## License
 
