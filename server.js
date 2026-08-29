@@ -2034,10 +2034,22 @@ function itemHasContent(root, workshopId) {
 }
 
 // Move rather than delete, so every step before the server comes back up is reversible.
+//
+// /pz-data, /workshop and /pz-install are three separate bind mounts, so a rename between them is
+// EXDEV — which is every move out of the workshop tree, since the quarantine lives under /pz-data.
+// The fallback copies first and only unlinks once the copy is complete, so a half-finished copy is
+// never the only surviving version of a mod.
 function quarantineMove(from, to) {
   if (!fs.existsSync(from)) return false
   fs.mkdirSync(path.dirname(to), { recursive: true })
-  fs.renameSync(from, to)
+  try {
+    fs.renameSync(from, to)
+  } catch (e) {
+    if (e.code !== 'EXDEV') throw e
+    fs.rmSync(to, { recursive: true, force: true }) // a partial copy from an earlier attempt
+    fs.cpSync(from, to, { recursive: true })
+    fs.rmSync(from, { recursive: true, force: true })
+  }
   return true
 }
 
@@ -2050,10 +2062,42 @@ function pruneQuarantine(s) {
   } catch {}
 }
 
-// Enabled mod ids with no folder on disk to load them from. This must be empty before the
-// container is allowed to start — it is the whole safety condition in one line.
+function safeReaddir(dir) {
+  try { return fs.readdirSync(dir) } catch { return [] }
+}
+
+// Mod ids the game can actually load, read from the two trees PZ itself scans: the SteamCMD
+// install tree for Workshop mods, and <data>/mods for local ones. Deliberately not /workshop —
+// that is the manager's inventory mirror, which B42 never reads, so counting it would let a mod
+// pass this check and then fail to load.
+function loadableModIds(s) {
+  const ids = new Set()
+  const take = (folderPath) => {
+    const info = findModInfo(folderPath)
+    if (!info) return
+    try {
+      const m = fs.readFileSync(info, 'utf8').match(/^id=(.+)$/m)
+      if (m) ids.add(m[1].trim())
+    } catch {}
+  }
+  const inst = installContent(s)
+  if (inst) {
+    for (const wid of safeReaddir(inst)) {
+      const dir = path.join(inst, wid, 'mods')
+      for (const folder of safeReaddir(dir)) {
+        if (/^\d+\.\d+$/.test(folder)) continue
+        take(path.join(dir, folder))
+      }
+    }
+  }
+  for (const folder of safeReaddir(modsDir(s))) take(path.join(modsDir(s), folder))
+  return ids
+}
+
+// Enabled mod ids with nothing on disk to load them from. This must be empty before the container
+// is allowed to start — it is the whole safety condition in one line.
 function missingProviders(s, enabledIds) {
-  const provided = new Set(modIdsByFolder(s).map(r => r.modId))
+  const provided = loadableModIds(s)
   return enabledIds.filter(id => !provided.has(id))
 }
 
@@ -2077,6 +2121,8 @@ async function reinstallWorkshopItem(s, workshopId) {
   const quarantine = path.join(reinstallDir(s), workshopId + '-' + stamp)
   const snapshot = { mods: getIniList(s, 'Mods'), workshopItems: getIniList(s, 'WorkshopItems') }
   const foldersBefore = modNamesFromWorkshop(s, workshopId)
+  let stopped = false          // the container is down and this flow owes it a start
+  let installed = false        // step 7 ran, so there are fresh files on disk to clear on rollback
   let movedWorkshop = false
   const movedModFolders = []
 
@@ -2084,10 +2130,14 @@ async function reinstallWorkshopItem(s, workshopId) {
   // agree again, which is the sole condition under which the server may be started.
   const rollback = () => {
     try {
-      for (const folder of modNamesFromWorkshop(s, workshopId)) {
-        if (movedModFolders.includes(folder)) continue // restored below from the quarantine
-        if (folderProviders(s, folder).filter(id => id !== workshopId).length) continue // shared
-        try { fs.rmSync(path.join(modsDir(s), folder), { recursive: true, force: true }) } catch {}
+      // Only when step 7 actually laid fresh files down. Without this guard a failure before the
+      // swap would delete the item's mod folders and have nothing quarantined to put back.
+      if (installed) {
+        for (const folder of modNamesFromWorkshop(s, workshopId)) {
+          if (movedModFolders.includes(folder)) continue // restored below from the quarantine
+          if (folderProviders(s, folder).filter(id => id !== workshopId).length) continue // shared
+          try { fs.rmSync(path.join(modsDir(s), folder), { recursive: true, force: true }) } catch {}
+        }
       }
       if (movedWorkshop) {
         fs.rmSync(path.join(workshopContent(s), workshopId), { recursive: true, force: true })
@@ -2144,6 +2194,15 @@ async function reinstallWorkshopItem(s, workshopId) {
     step('verifying downloaded files')
     if (!itemHasContent(install, workshopId)) throw new Error('SteamCMD produced no loadable mod folders for ' + workshopId + ' — nothing has been changed')
 
+    // The quarantine is on a different filesystem from the workshop tree, so it is a copy, not a
+    // relink. Checked here because running out of room mid-swap would strand the server down.
+    const needBytes = dirSizeBytes(path.join(workshopContent(s), workshopId)) + dirSizeBytes(path.join(install, workshopId))
+    const haveBytes = freeBytes(s)
+    if (haveBytes && needBytes > haveBytes * 0.9) {
+      throw new Error('Not enough free space to quarantine ' + workshopId + ': needs about ' +
+        humanBytes(needBytes) + ', ' + humanBytes(haveBytes) + ' free — nothing has been changed')
+    }
+
     // 5 — down. saveThen() writes the world first; without it the JVM is SIGKILLed and the world
     // reverts to its last autosave.
     step('saving world and stopping server')
@@ -2151,6 +2210,7 @@ async function reinstallWorkshopItem(s, workshopId) {
     mstate(s).intentionalStop = true
     await saveThenAsync(s)
     await sh('docker stop ' + s.container, 120000)
+    stopped = true
 
     // 6 — quarantine the old copies. The install tree is deliberately not moved: SteamCMD already
     // replaced it in steps 2-3, and it is the one tree that can be re-fetched from Steam at will.
@@ -2169,6 +2229,7 @@ async function reinstallWorkshopItem(s, workshopId) {
     // skips them and then calls applyExcludes for the install tree).
     step('installing fresh files')
     const result = registerInstalledMod(s, workshopId, { force: true })
+    installed = true
     if (result.status !== 'installed') throw new Error('Fresh files produced no loadable mod ids')
 
     // 9 — put Mods= back exactly as it was. registerInstalledMod appends, which would silently
@@ -2202,8 +2263,10 @@ async function reinstallWorkshopItem(s, workshopId) {
     state.finishedAt = new Date().toISOString()
     logFor(s, 'reinstall ' + workshopId + ' FAILED at [' + failedAt + ']: ' + e.message)
 
-    // Nothing has been moved yet, so the server is still running and untouched.
-    if (!movedWorkshop && !movedModFolders.length) {
+    // Keyed on the stop, not on whether any file moved: a failure on the very first move happens
+    // with the container already down, and reporting "nothing changed" there would leave the
+    // server stopped with nobody bringing it back.
+    if (!stopped) {
       pushoverFor(s, 'PZ Mod Reinstall Failed', 'Workshop item ' + workshopId + ' failed at "' + failedAt + '". The server was not stopped and nothing changed.')
       return state
     }
@@ -2498,13 +2561,18 @@ function auditServer(s) {
   const enabledSet = new Set(enabled)
   const duplicateIds = duplicateModIds(s).filter(d => enabledSet.has(d.modId))
 
+  // phantomEnabled above reads the /workshop mirror. This reads the two trees the game itself
+  // scans, so it catches the case that one cannot: a mod present in the manager's inventory but
+  // absent from where PZ looks, which loads as nothing and drops its items from the save.
+  const notLoadable = missingProviders(s, enabled)
+
   const reclaimable = unregistered.reduce((n, u) => n + u.bytes, 0) + orphanFolders.reduce((n, o) => n + o.bytes, 0)
 
   return {
     registered: registered.length,
     enabled: enabled.length,
     onDisk: onDisk.length,
-    unregistered, missingContent, orphanFolders, phantomEnabled, installedNotEnabled, duplicateIds,
+    unregistered, missingContent, orphanFolders, phantomEnabled, installedNotEnabled, duplicateIds, notLoadable,
     reclaimableBytes: reclaimable,
     reclaimableHuman: humanBytes(reclaimable),
     freeBytes: freeBytes(s),
@@ -2904,6 +2972,10 @@ app.get('/api/alerts', (req, res) => {
   if (audit) {
     if (audit.missingContent.length) push('error', 'files', audit.missingContent.length + ' registered mod(s) missing files', 'Registered in WorkshopItems but nothing on disk: ' + audit.missingContent.join(', '), { tab: 'mods' })
     if (audit.phantomEnabled.length) push('warn', 'files', audit.phantomEnabled.length + ' enabled mod id(s) not provided by any install', audit.phantomEnabled.join(', '), { tab: 'mods' })
+    if (audit.notLoadable.length) {
+      push('error', 'files', audit.notLoadable.length + ' enabled mod id(s) the game cannot load',
+        audit.notLoadable.join(', ') + '. Not present in the install tree or in the mods folder, so the server starts without them and drops their items from the save.', { tab: 'mods' })
+    }
     // Ranked as an error: this is the one that makes a restart come up differently each time, and
     // it stays invisible until someone reads a boot log line by line.
     if (audit.duplicateIds.length) {
