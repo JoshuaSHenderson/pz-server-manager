@@ -8,9 +8,11 @@ const crypto = require('crypto')
 const net = require('net')
 const { droppedItems } = require('./prune')
 const { parseDepList, analyzeDependencies, sortIssues } = require('./deps')
-const { validateReorder } = require('./order')
+const { validateReorder, moveItem } = require('./order')
 const { outdatedItems, seedState, dueForCheck, shouldRestart, shouldDownload } = require('./autoupdate')
 const { readyCheck } = require('./ready')
+const { reconcileMods } = require('./modload')
+const { analyzeModDrift, planRepair, versionRank } = require('./moddrift')
 const { allExcludes, addExclude, removeExclude, isExcluded, removalTargets, validFolder, validWorkshopId } = require('./excludes')
 const { saveThenGoDown } = require('./save')
 const { makeState: makePlayerState, applyLine: applyPlayerLine, replay: replayPlayerLog, onlineNames: playerNames, parseConnectedCount } = require('./players')
@@ -268,6 +270,15 @@ function setIniValue(s, key, value) {
 }
 
 // --- Workshop helpers ---
+// The first mod.info in the folder, root before version subfolders. Good enough to answer "is
+// there a mod here", which is all modFolders() asks.
+//
+// It is NOT the id the game will register: a B42 folder holds one mod.info per version folder and
+// authors rename id= between them (42.0 SpnCharCustom -> 42.13 SPNCC; 3161951724 fixed a typo,
+// 76chevyKserieseExpanded -> 76chevyKseriesExpanded). PZ takes the highest version folder not
+// newer than the running build; this takes the root. So an id read from here can be one the game
+// never loads, and missingProviders() will pass it. Whether Mods= is actually live is settled
+// after boot by reportDeadMods() against the log — see modload.js.
 function findModInfo(modFolder) {
   const direct = path.join(modFolder, 'mod.info')
   if (fs.existsSync(direct)) return direct
@@ -279,16 +290,54 @@ function findModInfo(modFolder) {
   } catch {}
   return null
 }
+// Where to read an item's mod ids from. The install tree first: that is what SteamCMD last wrote,
+// so it is both what the game loads and what Steam serves to clients.
+//
+// Not the mirror. registerInstalledMod() copies into the mirror with `cp -rn`, which never
+// overwrites, so a mod.info there keeps whatever id the author used at first install. Reading ids
+// from it meant every auto-update re-appended the *old* id to Mods=: MarzGuns kept coming back
+// months after the Workshop renamed it to GunsOfMarz, and the stale <data>/mods copy — protected
+// by the same never-overwrite rule — made the dead id look valid on disk. That pair is the whole
+// engine behind "Mod ... is not installed [WorkshopID: ]".
+// The mod.info the game will actually read: the highest version folder not newer than the build,
+// else the folder root, else common/.
+//
+// findModInfo() answers a different question — "is there a mod here" — and returns the first file
+// it finds. For Hot Brass that is the root copy declaring the B41 id zHBVCEF, while the running
+// build registers HBVCEFb42 from 42.15/. Keyed by the wrong id, an enabled and perfectly loaded
+// mod showed up in the UI as "not installed" with no title and no Workshop link.
+function preferredModInfo(modFolder, buildRank) {
+  let best = null, bestRank = -1, common = null
+  for (const sub of safeReaddir(modFolder)) {
+    const p = path.join(modFolder, sub, 'mod.info')
+    if (!fs.existsSync(p)) continue
+    const rank = versionRank(sub)
+    if (rank === null) { if (sub === 'common') common = p; continue }
+    if ((buildRank === null || rank <= buildRank) && rank > bestRank) { bestRank = rank; best = p }
+  }
+  if (best) return best
+  const root = path.join(modFolder, 'mod.info')
+  if (fs.existsSync(root)) return root
+  return common
+}
+
+function itemModsRoot(s, workshopId) {
+  const inst = installContent(s)
+  const fromInstall = inst && path.join(inst, workshopId, 'mods')
+  if (fromInstall && fs.existsSync(fromInstall)) return fromInstall
+  return path.join(workshopContent(s), workshopId, 'mods')
+}
 function modFolders(s, workshopId) {
-  const dir = path.join(workshopContent(s), workshopId, 'mods')
+  const dir = itemModsRoot(s, workshopId)
   if (!fs.existsSync(dir)) return []
   return fs.readdirSync(dir).filter(f => !/^\d+\.\d+$/.test(f) && findModInfo(path.join(dir, f)))
 }
 function modIdsFromWorkshop(s, workshopId) {
-  const dir = path.join(workshopContent(s), workshopId, 'mods')
+  const dir = itemModsRoot(s, workshopId)
   const ids = []
+  const buildRank = serverBuildRank(s)
   for (const folder of modFolders(s, workshopId)) {
-    const info = findModInfo(path.join(dir, folder))
+    const info = preferredModInfo(path.join(dir, folder), buildRank)
     if (info) {
       const m = fs.readFileSync(info, 'utf8').match(/^id=(.+)$/m)
       if (m) ids.push(m[1].trim())
@@ -304,11 +353,15 @@ function modNamesFromWorkshop(s, workshopId) { return modFolders(s, workshopId) 
 // picked between them at random on every boot. Anything that needs to reason about folders rather
 // than ids uses this.
 function modIdsByFolder(s) {
+  const buildRank = serverBuildRank(s)
   const rows = []
   for (const wid of getIniList(s, 'WorkshopItems')) {
-    const dir = path.join(workshopContent(s), wid, 'mods')
+    // Same root modFolders() walked. Reading folder names from one tree and mod.info from the
+    // other is how a renamed mod ends up listed as "not installed": the folder is found in the
+    // install tree, the id is read from the mirror's never-overwritten copy, and the two disagree.
+    const dir = itemModsRoot(s, wid)
     for (const folder of modFolders(s, wid)) {
-      const info = findModInfo(path.join(dir, folder))
+      const info = preferredModInfo(path.join(dir, folder), buildRank)
       if (!info) continue
       let m
       try { m = fs.readFileSync(info, 'utf8').match(/^id=(.+)$/m) } catch { continue }
@@ -331,11 +384,15 @@ function duplicateModIds(s) {
 // Full mod.info metadata for every installed mod, keyed by mod id. Same files
 // modIdsFromWorkshop() reads, but keeps the dependency fields as well.
 function installedModMeta(s) {
+  const buildRank = serverBuildRank(s)
   const out = {}
   for (const wid of getIniList(s, 'WorkshopItems')) {
-    const dir = path.join(workshopContent(s), wid, 'mods')
+    // Same root modFolders() walked. Reading folder names from one tree and mod.info from the
+    // other is how a renamed mod ends up listed as "not installed": the folder is found in the
+    // install tree, the id is read from the mirror's never-overwritten copy, and the two disagree.
+    const dir = itemModsRoot(s, wid)
     for (const folder of modFolders(s, wid)) {
-      const info = findModInfo(path.join(dir, folder))
+      const info = preferredModInfo(path.join(dir, folder), buildRank)
       if (!info) continue
       let txt
       try { txt = fs.readFileSync(info, 'utf8') } catch { continue }
@@ -753,10 +810,61 @@ setInterval(() => {
           if (cfg.enabled && cfg.events && cfg.events.serverReady !== false) {
             pushoverFor(s, 'PZ Server Ready', 'Finished loading after ' + verdict.took + ' — accepting players now.')
           }
+          reportDeadMods(s, since)
+          reportModDrift(s)
         })
     })
   }
 }, 20000)
+
+// Enabled mods no client can download — see moddrift.js. Deliberately separate from
+// reportDeadMods(): these load perfectly well on the server, so the boot log shows nothing wrong,
+// and the first symptom is a player being told the mod "is not installed" with an empty
+// WorkshopID. Checked at boot so it surfaces before someone tries to join, not after.
+function reportModDrift(s) {
+  let report
+  try { report = modDriftReport(s) } catch (e) { return console.error('[drift]', e.message) }
+  if (report.stale.length) {
+    logFor(s, report.stale.length + ' local mod copy(ies) behind the Workshop: ' +
+      report.stale.map(t => t.folder + ' ' + (t.local || 'none') + '->' + t.workshop).join(', '))
+  }
+  if (!report.issues.length) {
+    console.log('[drift] ' + serverLabel(s) + ': all ' + report.ok.length + ' enabled mods are obtainable by clients')
+    return
+  }
+  const list = report.issues.map(i => i.id + (i.suggest.length === 1 ? ' -> ' + i.suggest[0] : ' (' + i.kind + ')')).join(', ')
+  logFor(s, 'clients cannot download ' + report.issues.length + ' enabled mod(s): ' + list)
+  const cfg = readNotifConfig()
+  if (cfg.enabled && cfg.events && cfg.events.modDrift !== false) {
+    pushoverFor(s, 'PZ Mods Unobtainable',
+      report.issues.length + ' enabled mod(s) cannot be downloaded by players: ' + list)
+  }
+}
+
+// Mods that are enabled but never registered — see modload.js for why the disk cannot answer this
+// and the boot log can. Runs once the ready marker is up, because by then the mod phase is over and
+// the log is complete for this run.
+//
+// grep exits 1 with no output when nothing matched, which reconcileMods reads as "no information"
+// rather than "every mod is dead", so a failed or truncated read stays silent instead of paging.
+function reportDeadMods(s, since) {
+  exec('docker logs ' + s.container + ' --since ' + since + ' 2>&1 | grep -F "> loading "',
+    { maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+      const r = reconcileMods(getIniList(s, 'Mods'), out)
+      if (!r.known) return
+      if (!r.dead.length) {
+        console.log('[mods] ' + serverLabel(s) + ': all ' + r.loaded.length + ' enabled mods loaded')
+        return
+      }
+      const list = r.dead.join(', ')
+      logFor(s, 'enabled but did not load: ' + list)
+      const cfg = readNotifConfig()
+      if (cfg.enabled && cfg.events && cfg.events.modsNotLoaded !== false) {
+        pushoverFor(s, 'PZ Mods Not Loaded',
+          r.dead.length + ' enabled mod' + (r.dead.length > 1 ? 's' : '') + ' did not load: ' + list)
+      }
+    })
+}
 
 // Low disk monitor (shared filesystem — one check, one alert)
 let lowDiskAlerted = false
@@ -1990,6 +2098,189 @@ app.post('/api/mods/enabled', (req, res) => {
   res.json({ success: true, modId, enabled })
 })
 
+// --- Mod id drift (see moddrift.js) ---
+
+// The build the game is running, read from its own log ("version=42.20.4 b0bbce05d5 demo=false").
+// Returns null when it cannot be read — a server that has never booted, or a rotated log — and
+// every caller treats null as "take the newest version folder" rather than refusing to answer.
+function serverBuildRank(s) {
+  try {
+    const logs = fs.readdirSync(logDir(s)).filter(f => f.endsWith('_DebugLog-server.txt')).sort()
+    if (!logs.length) return null
+    const head = fs.readFileSync(path.join(logDir(s), logs[logs.length - 1]), 'utf8').slice(0, 20000)
+    const m = head.match(/version=(\d+(?:\.\d+){0,2})/)
+    return m ? versionRank(m[1]) : null
+  } catch { return null }
+}
+
+// Every id= in a mod folder, plus the one the game will actually register. PZ takes the highest
+// version folder that is not newer than the build, falling back to the folder root (a B41 layout).
+// findModInfo() deliberately is not used here — it answers "is there a mod", not "which id".
+function folderIds(modFolder, buildRank) {
+  const ids = []
+  let best = null, bestRank = -1
+  const read = (file) => {
+    try {
+      const m = fs.readFileSync(file, 'utf8').match(/^id=(.+)$/m)
+      return m ? m[1].trim() : null
+    } catch { return null }
+  }
+  const rootId = fs.existsSync(path.join(modFolder, 'mod.info')) ? read(path.join(modFolder, 'mod.info')) : null
+  if (rootId) ids.push(rootId)
+  // Every immediate subfolder, not just version-named ones: mod.info legitimately lives in
+  // common/ with nothing at the root (CarriableItems and B42PackMule both ship that way), and
+  // missing it reports a perfectly healthy mod as an orphan. Generous about what counts as
+  // *provided* — that is the obtainability question — and strict about which id actually loads,
+  // which only a version folder can decide.
+  let commonId = null
+  for (const sub of safeReaddir(modFolder)) {
+    const id = read(path.join(modFolder, sub, 'mod.info'))
+    if (!id) continue
+    ids.push(id)
+    const rank = versionRank(sub)
+    if (rank === null) { if (sub === 'common') commonId = id; continue }
+    if ((buildRank === null || rank <= buildRank) && rank > bestRank) { bestRank = rank; best = id }
+  }
+  return { ids: [...new Set(ids)], preferredId: best || rootId || commonId || null }
+}
+
+// One entry per mod folder across both trees the game reads. `local` is <data>/mods, which no
+// client can obtain from; `workshop` is the install tree, which mirrors what Steam serves.
+function buildModInventory(s) {
+  const buildRank = serverBuildRank(s)
+  const out = []
+  const inst = installContent(s)
+  if (inst) {
+    for (const wid of safeReaddir(inst)) {
+      const dir = path.join(inst, wid, 'mods')
+      for (const folder of safeReaddir(dir)) {
+        if (versionRank(folder) !== null) continue
+        const { ids, preferredId } = folderIds(path.join(dir, folder), buildRank)
+        if (ids.length) out.push({ folder, source: 'workshop', workshopId: wid, ids, preferredId })
+      }
+    }
+  }
+  for (const folder of safeReaddir(modsDir(s))) {
+    const { ids, preferredId } = folderIds(path.join(modsDir(s), folder), buildRank)
+    if (ids.length) out.push({ folder, source: 'local', workshopId: null, ids, preferredId })
+  }
+  return out
+}
+
+// Whether the local copy and the Workshop copy of a folder are the same build, compared by
+// relative path + size and ignoring mod.info (the one file we already know differs).
+//
+// This is the safety gate on a repair. Identical builds mean the rename is pure bookkeeping —
+// 76chevyKserieseExpanded differed from the Workshop copy by a single byte. Different builds mean
+// switching makes the game load different scripts, and PZ discards items whose ids no longer
+// exist: GunsOfMarz renamed M4 to M4A1 and dropped Booster_Scope, which cost three objects here.
+function buildsIdentical(s, folder) {
+  const inst = installContent(s)
+  if (!inst) return null
+  const wsRoot = safeReaddir(inst)
+    .map(wid => path.join(inst, wid, 'mods', folder))
+    .find(p => fs.existsSync(p))
+  const localRoot = path.join(modsDir(s), folder)
+  if (!wsRoot || !fs.existsSync(localRoot)) return null
+  const listing = (root) => {
+    const acc = []
+    const walk = (dir, rel) => {
+      for (const name of safeReaddir(dir).sort()) {
+        const full = path.join(dir, name)
+        let st
+        try { st = fs.statSync(full) } catch { continue }
+        if (st.isDirectory()) walk(full, rel + name + '/')
+        else if (name !== 'mod.info') acc.push(rel + name + ':' + st.size)
+      }
+    }
+    walk(root, '')
+    return acc.join('\n')
+  }
+  try { return listing(wsRoot) === listing(localRoot) } catch { return null }
+}
+
+// Local copies the Workshop has moved past — the state drift grows out of.
+//
+// registerInstalledMod() copies into <data>/mods only when the destination is absent, so an
+// auto-update refreshes the install tree and leaves the local copy at whatever version it was
+// first installed at. That copy keeps serving its old id, which is how an entry in Mods= can stay
+// valid on disk for months after Steam has renamed it.
+//
+// Reported, never repaired automatically: refreshing a stale copy swaps the build the game loads,
+// and PZ discards items whose ids that build no longer defines. Doing it unprompted would have
+// destroyed items here. Compares version-folder names only — a readdir, not a tree walk, so this
+// stays cheap enough to run on every boot.
+function staleLocalCopies(s) {
+  const inst = installContent(s)
+  if (!inst) return []
+  const wsFolders = new Map()
+  for (const wid of safeReaddir(inst)) {
+    const dir = path.join(inst, wid, 'mods')
+    for (const folder of safeReaddir(dir)) {
+      if (versionRank(folder) !== null) continue
+      if (!wsFolders.has(folder)) wsFolders.set(folder, { workshopId: wid, dir: path.join(dir, folder) })
+    }
+  }
+  const out = []
+  for (const folder of safeReaddir(modsDir(s))) {
+    const ws = wsFolders.get(folder)
+    if (!ws) continue
+    const versions = (dir) => safeReaddir(dir).filter(f => versionRank(f) !== null)
+    const top = (dir) => versions(dir).reduce((a, b) => (versionRank(b) > versionRank(a || '0') ? b : a), null)
+    const wsTop = top(ws.dir), localTop = top(path.join(modsDir(s), folder))
+    if (wsTop && versionRank(wsTop) > versionRank(localTop || '0')) {
+      out.push({ folder, workshopId: ws.workshopId, workshop: wsTop, local: localTop })
+    }
+  }
+  return out
+}
+
+function modDriftReport(s) {
+  const inventory = buildModInventory(s)
+  const analysis = analyzeModDrift({ enabled: getIniList(s, 'Mods'), inventory })
+  const issues = analysis.issues.map(i => ({
+    ...i,
+    // Only meaningful for a rename; an orphan has no local copy to compare.
+    buildsIdentical: i.kind === 'clientBlocked' ? buildsIdentical(s, i.folder) : null,
+  }))
+  return { ok: analysis.ok, issues, stale: staleLocalCopies(s), checkedAt: new Date().toISOString() }
+}
+
+// Dry run. Lists every enabled mod a client could not download, and what to rename it to.
+app.get('/api/mods/drift', (req, res) => res.json(modDriftReport(srv(req))))
+
+// Apply renames. Refuses anything the report did not suggest, and refuses a rename between two
+// different builds unless the caller has seen the item cost and passed acceptItemLoss.
+app.post('/api/mods/drift/repair', (req, res) => {
+  const s = srv(req)
+  const { remaps, acceptItemLoss } = req.body || {}
+  if (!Array.isArray(remaps) || !remaps.length) return res.status(400).json({ error: 'remaps required' })
+
+  const report = modDriftReport(s)
+  const byId = new Map(report.issues.map(i => [i.id, i]))
+  const unsafe = remaps
+    .map(r => byId.get(String((r || {}).from || '').trim()))
+    .filter(i => i && i.buildsIdentical === false)
+  if (unsafe.length && !acceptItemLoss) {
+    return res.status(409).json({
+      error: 'Different builds — renaming these makes the game load different scripts, and items ' +
+             'whose ids no longer exist are discarded. Re-send with acceptItemLoss:true to proceed.',
+      needsConfirmation: unsafe.map(i => ({ id: i.id, folder: i.folder, suggest: i.suggest })),
+    })
+  }
+
+  const mods = getIniList(s, 'Mods')
+  const plan = planRepair(report, mods, remaps)
+  if (!plan.applied.length) return res.status(400).json({ error: 'no applicable remap', rejected: plan.rejected })
+
+  const backup = backupModOrder(s, 'before mod id drift repair')
+  setIniList(s, 'Mods', plan.mods)
+  logFor(s, 'mod id drift repaired: ' + plan.applied.map(a => a.from + ' -> ' + a.to).join(', ') +
+    ', previous Mods= backed up as ' + backup)
+  res.json({ success: true, applied: plan.applied, rejected: plan.rejected, backup,
+             restartRequired: true })
+})
+
 // --- Clean reinstall of one Workshop item ---
 //
 // Removing a mod's files and letting the server boot without it is how a save loses items: PZ
@@ -2072,8 +2363,12 @@ function safeReaddir(dir) {
 // pass this check and then fail to load.
 function loadableModIds(s) {
   const ids = new Set()
+  const buildRank = serverBuildRank(s)
   const take = (folderPath) => {
-    const info = findModInfo(folderPath)
+    // The id the game registers, not the first mod.info in the folder — otherwise Hot Brass reads
+    // as zHBVCEF (root, B41) while the running build loads HBVCEFb42 from 42.15/, and this gate
+    // reports a mod that is enabled and loading fine as having nothing on disk to load it.
+    const info = preferredModInfo(folderPath, buildRank)
     if (!info) return
     try {
       const m = fs.readFileSync(info, 'utf8').match(/^id=(.+)$/m)
@@ -2679,7 +2974,19 @@ app.get('/api/dependencies', (req, res) => {
     }),
     checked: enabled.length,
     installedCount: installed.length,
-    ignored: ignores
+    // Flagged rather than silently dropped: an ignore whose mod is no longer enabled can never
+    // match again, so it sits in the list forever with nothing on screen explaining why. That is
+    // what a mod id rename leaves behind — "MarzGuns>SWMG" outlived the id it was written for.
+    // Still the user's decision to clear, so it is reported, not deleted.
+    ignored: ignores.map(k => {
+      const at = String(k).indexOf('>')
+      const modId = at === -1 ? k : k.slice(0, at)
+      const dependency = at === -1 ? '' : k.slice(at + 1)
+      return {
+        key: k, modId, dependency,
+        stale: !enabled.some(id => id.toLowerCase() === String(modId).toLowerCase()),
+      }
+    })
   })
 })
 
@@ -2696,6 +3003,64 @@ app.post('/api/dependencies/ignore', (req, res) => {
   writeDepIgnores(s, list)
   logFor(s, (ignored ? 'ignoring' : 'restored') + ' dependency ' + key)
   res.json({ success: true, key, ignored })
+})
+
+// Satisfy one loadModAfter constraint by moving the dependent mod.
+//
+// "X must load after Y" with Y sitting later in Mods= is a pure ordering fault, so the repair is a
+// move and nothing else: the mod that carries the constraint slides to just past the mod it names.
+// moveItem(list, from, to) with to = the dependency's index does exactly that — removing the entry
+// first shifts the dependency down one, so inserting at its old index lands immediately after it.
+//
+// Deliberately one pair per press. A mod can carry several loadModAfter entries and mods can
+// constrain each other, so a single move can satisfy one pair and break another; a full
+// topological sort would reshuffle a 173-entry list the user has hand-tuned. Instead the move is
+// applied, the analysis re-run, and whatever is still outstanding reported back so the next press
+// works on current facts.
+//
+// The pair must be a real, current issue — a caller cannot post an arbitrary move here, because
+// this writes Mods= and order is what loadModAfter depends on.
+app.post('/api/dependencies/fix-order', (req, res) => {
+  const s = srv(req)
+  const { modId, dependency } = req.body || {}
+  if (!modId || !dependency) return res.status(400).json({ error: 'modId and dependency are required' })
+
+  const meta = installedModMeta(s)
+  const mods = getIniList(s, 'Mods')
+  const issues = analyzeDependencies({
+    enabled: mods, installed: Object.keys(meta), meta, ignores: readDepIgnores(s),
+  })
+  const lower = v => String(v).toLowerCase()
+  const issue = issues.find(i => i.type === 'order' &&
+    lower(i.modId) === lower(modId) && lower(i.dependency) === lower(dependency))
+  if (!issue) return res.status(400).json({ error: 'Not a current load-order issue: ' + modId + ' after ' + dependency })
+
+  // Resolve against Mods= itself: loadModAfter values are frequently mis-cased by authors.
+  const from = mods.findIndex(id => lower(id) === lower(issue.modId))
+  const to = mods.findIndex(id => lower(id) === lower(issue.dependency))
+  if (from === -1 || to === -1) return res.status(400).json({ error: 'Both mods must be in the load order' })
+
+  const next = moveItem(mods, from, to)
+  const check = validateReorder(mods, next)
+  if (!check.ok) return res.status(500).json({ error: 'Refusing to write a non-permutation: ' + check.error })
+
+  const backup = backupModOrder(s, 'before load-order fix: ' + issue.modId + ' after ' + issue.dependency)
+  setIniList(s, 'Mods', next)
+
+  const remaining = analyzeDependencies({
+    enabled: next, installed: Object.keys(meta), meta, ignores: readDepIgnores(s),
+  }).filter(i => i.type === 'order')
+
+  logFor(s, 'load-order fix: moved "' + issue.modId + '" from ' + (from + 1) + ' to ' + (to + 1) +
+    ' so it loads after "' + issue.dependency + '"' +
+    (remaining.length ? ' (' + remaining.length + ' order issue(s) still outstanding)' : '') +
+    ', previous order backed up as ' + backup)
+
+  res.json({
+    success: true, modId: issue.modId, dependency: issue.dependency,
+    from: from + 1, to: to + 1, backup,
+    remainingOrderIssues: remaining.length, restartRequired: true,
+  })
 })
 
 // --- Mod auto-update ---
