@@ -430,6 +430,42 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
 /* Shorter, but scrolls exactly like the server log rather than clipping at a max-height. */
 #mlog-output { height: 26vh; min-height: 180px }
 #log-output::-webkit-scrollbar-thumb, #mlog-output::-webkit-scrollbar-thumb { background: rgba(74,222,128,.25); border: 2px solid transparent; background-clip: padding-box }
+/* ============ LOAD ORDER ============ */
+/* The position box has to read as part of the button strip beside it, so it borrows .btn-sm's
+   metrics exactly — same font size, radius, border and height — rather than looking like a stray
+   form field dropped into a row of controls. */
+#order-list { scrollbar-color: rgba(148,163,255,.45) rgba(0,0,0,.25) }
+#order-list::-webkit-scrollbar { width: 12px }
+#order-list::-webkit-scrollbar-track { background: rgba(0,0,0,.25); border-radius: 999px }
+#order-list::-webkit-scrollbar-thumb { background: rgba(148,163,255,.42); border-radius: 999px; border: 3px solid transparent; background-clip: padding-box }
+#order-list::-webkit-scrollbar-thumb:hover { background: rgba(148,163,255,.65); border: 3px solid transparent; background-clip: padding-box }
+
+.order-row {
+  display: flex; align-items: center; gap: .4rem;
+  padding: .3rem .5rem; border-bottom: 1px solid var(--border);
+}
+/* Clears the 12px scrollbar so the last button is never sitting under it. */
+.order-row > :last-child { margin-right: .55rem }
+.order-row .ord-label { flex: 1; font-size: .8rem; min-width: 0; word-break: break-word }
+/* Position is a read-only label. The only way to change it is a control, not a field you might
+   have half-edited and forgotten. */
+.ord-num {
+  flex: 0 0 auto; width: 2.6rem; text-align: right;
+  font-family: var(--font-mono); font-size: .72rem; color: var(--muted);
+}
+/* The editor replaces the Move to button in place, so the row never changes width or reflows.
+   The [hidden] rule is not optional: a class setting display beats the browser's own
+   [hidden]{display:none}, which would leave the editor showing on all 173 rows at once. */
+.ord-moveto { display: inline-flex; align-items: center; gap: .3rem }
+.ord-moveto[hidden], .ord-moveto-btn[hidden] { display: none }
+.ord-pos {
+  width: 3.6rem; text-align: center; flex: 0 0 auto;
+  font-family: var(--font-mono); font-size: .76rem;
+  padding: .32rem .35rem; border-radius: 7px;
+  background: rgba(0,0,0,.45); border: 1px solid rgba(244,63,94,.55); color: var(--text);
+}
+.ord-pos:focus { outline: none; box-shadow: 0 0 0 3px rgba(244,63,94,.14) }
+
 #mlog-count { color: var(--muted); font-size: .78rem; margin-left: auto; font-family: var(--font-mono) }
 .log-line { padding: .05rem 0 }
 .log-ts { color: rgba(74,222,128,.35); margin-right: .5rem }
@@ -738,6 +774,10 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
     <div class="pane-head"><h1>Mods</h1><p>Steam Workshop content installed on the server</p></div>
     <div id="mods-msg"></div>
 
+    <!-- Enabled mods no player can download. Above even the dropped-mod banner: a dropped mod
+         still lets people play, this stops them joining at all. Renders nothing when clean. -->
+    <div id="mods-drift"></div>
+
     <!-- Mods the collection curators dropped. Sits above everything else because it is the one
          thing on this page the server is actively wrong about: these are still loaded. Renders
          nothing at all when there is nothing outstanding. -->
@@ -794,6 +834,8 @@ tbody tr:hover td { background: rgba(255,255,255,.03) }
     <div id="mods-deps"></div>
     <div id="mods-audit"></div>
     <div id="mods-order"></div>
+    <div id="mods-reinstall"></div>
+    <div id="mods-excludes"></div>
 
     <div class="card">
       <details id="installed-details" open ontoggle="panelOpen.installed = this.open">
@@ -1402,7 +1444,7 @@ function switchTab(tab) {
   document.getElementById('tab-' + tab).classList.add('active')
   if (tab === 'logs') { startLog(); startManagerLog() }
   else { stopLog(); stopManagerLog() }
-  if (tab === 'mods') { fetchMods(); fetchCollections(); fetchDependencies(); fetchAudit(); renderModOrder(); startDownloadPoll() }
+  if (tab === 'mods') { fetchMods(); fetchCollections(); fetchDependencies(); fetchAudit(); fetchModDrift(); renderModOrder(); startDownloadPoll() }
   if (tab === 'players') fetchPlayers()
   if (tab === 'settings') fetchNotifSettings()
   // Both restart automations now live at the top of Config, so both load with it.
@@ -1668,6 +1710,8 @@ function fetchMods() {
     cachedMods = d.mods || []
     renderModsTable(cachedMods)
   })
+  fetchExcludes()
+  fetchReinstall()
 }
 
 // "Build 41"/"Build 42" ride along on almost every Workshop item, so they're noise for grouping
@@ -1827,7 +1871,9 @@ function renderModsTable(mods) {
       '<td style="max-width:200px">' + tagHtml + '</td>' +
       '<td>' + coll + '</td>' +
       '<td>' + statusHtml + '</td>' +
-      '<td><button class="btn-danger btn-sm" onclick="removeMod(\'' + m.workshopId + '\')">Remove</button></td>' +
+      '<td style="white-space:nowrap">' +
+        '<button class="btn-secondary btn-sm" title="Delete this item and download it again from Steam" onclick="reinstallMod(\'' + m.workshopId + '\')">Reinstall</button> ' +
+        '<button class="btn-danger btn-sm" onclick="removeMod(\'' + m.workshopId + '\')">Remove</button></td>' +
       '</tr>'
   }).join('')
 
@@ -1904,22 +1950,26 @@ function renderModOrder() {
   if (!orderState.mods.length) { fetchModOrder(); return }
 
   var rows = orderState.mods.map(function(m, i) { return orderRowHtml(m, i) }).join('')
+  // Collapsed by default: backups are a recovery path, not something you read every visit, and
+  // eight rows of them pushed the actual list off the screen.
   var backups = orderState.backups.length
-    ? '<div style="margin-top:.8rem;font-size:.76rem;color:var(--muted)">' +
-      '<strong>Backups</strong> (a snapshot is taken automatically before every save)' +
+    ? '<details' + (panelOpen.orderBackups ? ' open' : '') + ' ontoggle="panelOpen.orderBackups = this.open" style="margin-top:.8rem">' +
+      '<summary style="cursor:pointer;font-size:.76rem;color:var(--muted)">Backups <span class="mono">(' + orderState.backups.length + ')</span>' +
+      ' <span style="opacity:.7">— a snapshot is taken automatically before every save</span></summary>' +
+      '<div style="font-size:.76rem;color:var(--muted);margin-top:.5rem">' +
       orderState.backups.slice(0, 8).map(function(b) {
         return '<div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.25rem 0">' +
           '<span class="mono">' + esc(b.file) + ' <span style="opacity:.7">' + (b.label ? esc(b.label) + ' · ' : '') + b.count + ' mods</span></span>' +
           '<button class="btn-secondary btn-sm" onclick="restoreModOrder(decodeURIComponent(\'' + encodeURIComponent(b.file) + '\'))">Restore</button>' +
           '</div>'
-      }).join('') + '</div>'
+      }).join('') + '</div></details>'
     : '<div style="margin-top:.8rem;font-size:.76rem;color:var(--muted)">No backups yet — one is taken automatically before each save.</div>'
 
   el.innerHTML = '<div class="card">' +
     '<details' + (panelOpen.order ? ' open' : '') + ' ontoggle="panelOpen.order = this.open">' +
     '<summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">' +
       '<span class="card-title" style="margin-bottom:0">Load order <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + orderState.mods.length + ')</span></span>' +
-      '<span style="font-size:.75rem;color:var(--muted)">Later entries win when two mods change the same thing</span>' +
+      '<span style="font-size:.75rem;color:var(--muted)">Later entries win when two mods change the same thing · Move to… jumps a mod straight to a position</span>' +
     '</summary>' +
     '<div style="display:flex;gap:.4rem;flex-wrap:wrap;margin:.9rem 0 .6rem">' +
       '<button class="btn-primary btn-sm" id="order-save" onclick="saveModOrder()" disabled>Save order</button>' +
@@ -1936,14 +1986,28 @@ function orderRowHtml(m, i) {
   var after = (m.loadModAfter || []).length
     ? '<span style="font-size:.68rem;color:#60a5fa"> after: ' + esc(m.loadModAfter.join(', ')) + '</span>' : ''
   var arg = "'" + encodeURIComponent(m.modId) + "'"
-  return '<div class="order-row" style="display:flex;align-items:center;gap:.5rem;padding:.25rem .5rem;border-bottom:1px solid var(--border)">' +
-    '<span class="ord-num mono" style="font-size:.7rem;color:var(--muted);width:2.6rem;text-align:right">' + (i + 1) + '</span>' +
-    '<span style="flex:1;font-size:.8rem;min-width:0;word-break:break-word">' + esc(m.modId) +
+  // Move to sits with Top/Bottom because it is the same kind of thing — one jump to a chosen
+  // place — and only asks for a number once pressed. With 170-odd mods, walking something from
+  // 12 to 150 on the arrows is 138 clicks; a permanently open field in the position column was
+  // worse, an editable box on every row that nothing tells you to submit.
+  // type=text + inputmode=numeric: a number input renders spinner arrows, which are the very
+  // click-one-at-a-time thing being replaced here.
+  return '<div class="order-row">' +
+    '<span class="ord-num">' + (i + 1) + '</span>' +
+    '<span class="ord-label">' + esc(m.modId) +
       (m.installed ? '' : ' <span style="color:#e74c3c;font-size:.68rem">(not installed)</span>') + after + '</span>' +
-    '<button class="btn-secondary btn-sm ord-up" title="Move up" onclick="moveOrderBy(this, decodeURIComponent(' + arg + '), -1)">&#9650;</button>' +
-    '<button class="btn-secondary btn-sm ord-down" title="Move down" onclick="moveOrderBy(this, decodeURIComponent(' + arg + '), 1)">&#9660;</button>' +
+    '<button class="btn-secondary btn-sm ord-up" title="Move up one" onclick="moveOrderBy(this, decodeURIComponent(' + arg + '), -1)">&#9650;</button>' +
+    '<button class="btn-secondary btn-sm ord-down" title="Move down one" onclick="moveOrderBy(this, decodeURIComponent(' + arg + '), 1)">&#9660;</button>' +
     '<button class="btn-secondary btn-sm" title="Move to top" onclick="moveOrderEdge(this, decodeURIComponent(' + arg + '), \'top\')">Top</button>' +
     '<button class="btn-secondary btn-sm" title="Move to bottom" onclick="moveOrderEdge(this, decodeURIComponent(' + arg + '), \'bottom\')">Bottom</button>' +
+    '<button class="btn-secondary btn-sm ord-moveto-btn" title="Move this mod to a position you choose" ' +
+      'onclick="openMoveTo(this)">Move to…</button>' +
+    '<span class="ord-moveto" hidden>' +
+      '<input class="ord-pos" type="text" inputmode="numeric" maxlength="4" aria-label="New position" ' +
+        'onkeydown="moveToKey(event, this, decodeURIComponent(' + arg + '))">' +
+      '<button class="btn-primary btn-sm" title="Move it there" onclick="commitMoveTo(this, decodeURIComponent(' + arg + '))">Go</button>' +
+      '<button class="btn-secondary btn-sm" title="Cancel" onclick="closeMoveTo(this)">&#10005;</button>' +
+    '</span>' +
     '</div>'
 }
 
@@ -1983,6 +2047,65 @@ function moveOrderBy(btn, modId, delta) {
 
 function moveOrderEdge(btn, modId, where) {
   applyOrderMove(btn, modId, where === 'top' ? 0 : orderState.mods.length - 1)
+}
+
+// Jump a mod straight to a typed position. Positions shown to the user are 1-based; the array is
+// 0-based. A blank or non-numeric entry just snaps back rather than moving anything somewhere
+// surprising, and out-of-range values clamp to the ends the same way the Top/Bottom buttons do.
+// "Move to…" asks for the number only once pressed, so the row stays a row of buttons until you
+// actually want to type. Only one editor is open at a time — leaving half-typed boxes scattered
+// down a 173-row list is how you move the wrong mod.
+function orderRowOf(el) { return el.closest ? el.closest('.order-row') : el.parentNode }
+
+function openMoveTo(btn) {
+  closeAllMoveTo()
+  var row = orderRowOf(btn)
+  if (!row) return
+  var box = row.querySelector('.ord-moveto')
+  var input = row.querySelector('.ord-pos')
+  var num = row.querySelector('.ord-num')
+  btn.hidden = true
+  box.hidden = false
+  // Seeded with the current position and selected, so typing replaces it outright.
+  input.value = num ? num.textContent.trim() : ''
+  input.focus()
+  input.select()
+}
+
+function closeMoveTo(el) {
+  var row = orderRowOf(el)
+  if (!row) return
+  var box = row.querySelector('.ord-moveto')
+  var btn = row.querySelector('.ord-moveto-btn')
+  if (box) box.hidden = true
+  if (btn) btn.hidden = false
+}
+
+function closeAllMoveTo() {
+  var list = document.getElementById('order-list')
+  if (!list) return
+  var open = list.querySelectorAll('.ord-moveto:not([hidden])')
+  for (var i = 0; i < open.length; i++) closeMoveTo(open[i])
+}
+
+function moveToKey(e, input, modId) {
+  if (e.key === 'Enter') { e.preventDefault(); commitMoveTo(input, modId) }
+  else if (e.key === 'Escape') { e.preventDefault(); closeMoveTo(input) }
+}
+
+// Blank or non-numeric just closes rather than moving anything somewhere surprising; out-of-range
+// clamps to the ends exactly like the Top/Bottom buttons.
+function commitMoveTo(el, modId) {
+  var row = orderRowOf(el)
+  var input = row && row.querySelector('.ord-pos')
+  if (!input) return
+  var from = orderState.mods.map(function(m) { return m.modId }).indexOf(modId)
+  var wanted = parseInt(input.value, 10)
+  if (from === -1 || isNaN(wanted)) { closeMoveTo(input); return }
+  var target = Math.max(0, Math.min(orderState.mods.length - 1, wanted - 1))
+  closeMoveTo(input)
+  if (target === from) return
+  applyOrderMove(row.querySelector('.ord-moveto-btn'), modId, target)
 }
 
 // Renumbers rows and syncs the Save/Discard state after an in-place move.
@@ -2245,8 +2368,9 @@ function renderAlerts(d) {
 // authors list optional companion mods in require= constantly, so every row asks rather than acts.
 // Panel open/closed state survives the innerHTML rebuild these panels do on every refresh.
 // Both start open so a real problem is never hidden behind a collapsed panel on first load.
-var panelOpen = { deps: true, audit: true, order: false, installed: true, collections: true, add: true, alerts: true }
+var panelOpen = { deps: true, audit: true, order: false, orderBackups: false, installed: true, collections: true, add: true, alerts: true }
 var cachedDeps = { issues: [], ignored: [] }
+var ignoredDepsOpen = false
 
 function fetchDependencies() {
   fetch('/api/dependencies').then(function(r) { return r.json() }).then(function(d) {
@@ -2274,9 +2398,11 @@ function renderDependencies() {
 
   if (!issues.length) {
     el.innerHTML = ignored
-      ? '<div class="msg msg-info" style="margin-bottom:1rem;font-size:.82rem">' +
+      ? ignoredDepsHtml() +
+        '<div class="msg msg-info" style="margin-bottom:1rem;font-size:.82rem">' +
         'All mod dependencies satisfied. <span style="opacity:.8">' + ignored + ' ignored ' +
-        '<a href="#" onclick="showIgnoredDeps();return false" style="color:#60a5fa">(review)</a>.</span></div>'
+        '<a href="#" onclick="showIgnoredDeps();return false" style="color:#60a5fa">(' +
+        (ignoredDepsOpen ? 'hide' : 'review') + ')</a>.</span></div>'
       : ''
     return
   }
@@ -2291,6 +2417,14 @@ function renderDependencies() {
       // Either side can go; the user knows which they actually want.
       actions.push('<button class="btn-danger btn-sm" onclick="depDisable(decodeURIComponent(\'' + encodeURIComponent(i.modId) + '\'))">Disable ' + esc(i.modId) + '</button>')
       if (i.dependencyModId) actions.push('<button class="btn-danger btn-sm" onclick="depDisable(decodeURIComponent(\'' + encodeURIComponent(i.dependencyModId) + '\'))">Disable ' + esc(i.dependencyModId) + '</button>')
+    }
+    if (i.type === 'order') {
+      // Sits before "Not required" so the repair reads ahead of the dismiss.
+      actions.push('<button class="btn-primary btn-sm" ' +
+        'onclick="depFixOrder(decodeURIComponent(\'' + encodeURIComponent(i.modId) + '\'), decodeURIComponent(\'' + encodeURIComponent(i.dependency) + '\'))" ' +
+        'title="Move ' + esc(i.modId) + ' down the load order to sit just after ' + esc(i.dependencyName || i.dependency) +
+        ', which is where it says it needs to be. Only the position changes — no mod is added, removed, enabled or disabled. ' +
+        'The current order is backed up first, and the server needs a restart to apply it.">Fix</button>')
     }
     if (i.type === 'missing') {
       actions.push('<a class="btn-secondary btn-sm" target="_blank" style="text-decoration:none" ' +
@@ -2310,12 +2444,13 @@ function renderDependencies() {
   }).join('')
 
   var blocking = issues.filter(function(i) { return i.type === 'incompatible' || i.type === 'missing' }).length
-  el.innerHTML = '<div class="card" style="margin-bottom:1rem;border-left:3px solid ' + (blocking ? '#e74c3c' : '#f5a623') + '">' +
+  el.innerHTML = ignoredDepsHtml() +
+    '<div class="card" style="margin-bottom:1rem;border-left:3px solid ' + (blocking ? '#e74c3c' : '#f5a623') + '">' +
     '<details' + (panelOpen.deps ? ' open' : '') + ' ontoggle="panelOpen.deps = this.open">' +
     '<summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">' +
       '<span class="card-title" style="margin-bottom:0">Dependency issues <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + issues.length + ')</span></span>' +
       '<span style="font-size:.75rem;color:var(--muted)">Checked ' + cachedDeps.checked + ' loaded mods' +
-        (ignored ? ' · ' + ignored + ' ignored <a href="#" onclick="showIgnoredDeps();return false" style="color:#60a5fa">(review)</a>' : '') + '</span>' +
+        (ignored ? ' · ' + ignored + ' ignored <a href="#" onclick="showIgnoredDeps();return false" style="color:#60a5fa">(' + (ignoredDepsOpen ? 'hide' : 'review') + ')</a>' : '') + '</span>' +
     '</summary>' +
     '<div style="font-size:.76rem;color:var(--muted);margin:.7rem 0">' +
       'Read from each mod\'s <span class="mono">mod.info</span>. Authors often list optional companion mods as required — ' +
@@ -2333,6 +2468,33 @@ function depEnable(modId) {
       fetchMods(); fetchDependencies()
     })
     .catch(function(e) { showMsg('mods-msg', 'Could not enable ' + modId + ': ' + e.message, 'error', 0) })
+}
+
+// One pair per press: a mod can carry several loadModAfter entries, and fixing one can expose the
+// next, so the reply says how many order issues are still outstanding rather than pretending the
+// list is clean. No confirm — a reorder is a validated permutation, so it cannot add, drop or
+// disable a mod, and the previous order is snapshotted before every write.
+function depFixOrder(modId, dependency) {
+  fetch('/api/dependencies/fix-order', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ modId: modId, dependency: dependency })
+  })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(res) {
+      if (!res.ok) throw new Error(res.d.error || 'unknown error')
+      var d = res.d
+      showMsg('mods-msg',
+        'Moved ' + d.modId + ' from position ' + d.from + ' to ' + d.to + ', after ' + d.dependency + '. ' +
+        (d.remainingOrderIssues
+          ? d.remainingOrderIssues + ' load-order issue(s) still outstanding. '
+          : 'No load-order issues left. ') +
+        'Restart the server to apply. Previous order saved as ' + d.backup + '.',
+        'success', 9000)
+      fetchDependencies()
+      // The Load order panel holds its own staged copy; refresh it or it shows the pre-move list.
+      fetchModOrder()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Could not fix the load order: ' + e.message, 'error', 0) })
 }
 
 function depDisable(modId) {
@@ -2361,20 +2523,36 @@ function depIgnore(modId, dependency, ignored) {
 }
 
 // Ignored pairings are reversible, so they need somewhere to be reviewed.
+// A toggle, and part of the normal render — not an insertAdjacentHTML into the panel, which
+// prepended a fresh copy on every press and left no way to close any of them.
 function showIgnoredDeps() {
+  ignoredDepsOpen = !ignoredDepsOpen
+  renderDependencies()
+}
+
+function ignoredDepsHtml() {
   var list = cachedDeps.ignored || []
-  if (!list.length) return
-  var el = document.getElementById('mods-deps')
-  el.insertAdjacentHTML('afterbegin',
-    '<div class="card" style="margin-bottom:1rem">' +
-    '<div class="card-title">Ignored dependencies <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + list.length + ')</span></div>' +
-    list.map(function(k) {
-      var parts = k.split('>')
-      return '<div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.4rem 0;font-size:.82rem">' +
-        '<span class="mono">' + esc(parts[0]) + ' → ' + esc(parts[1]) + '</span>' +
-        '<button class="btn-secondary btn-sm" onclick="depIgnore(decodeURIComponent(\'' + encodeURIComponent(parts[0]) + '\'), decodeURIComponent(\'' + encodeURIComponent(parts[1]) + '\'), false)">Restore</button>' +
-        '</div>'
-    }).join('') + '</div>')
+  if (!ignoredDepsOpen || !list.length) return ''
+  var rows = list.map(function(entry) {
+    // Tolerate the old shape (a plain "mod>dep" string) so a stale cached response can't throw.
+    var modId = entry.modId !== undefined ? entry.modId : String(entry).split('>')[0]
+    var dependency = entry.dependency !== undefined ? entry.dependency : String(entry).split('>')[1]
+    var stale = entry.stale
+      ? ' <span style="color:#f5a623;font-size:.72rem">— ' + esc(modId) + ' is not in the load order any more, so this can never apply. Safe to restore.</span>'
+      : ''
+    return '<div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.4rem 0;font-size:.82rem;flex-wrap:wrap">' +
+      '<span style="min-width:240px;flex:1"><span class="mono">' + esc(modId) + ' → ' + esc(dependency) + '</span>' + stale + '</span>' +
+      '<button class="btn-secondary btn-sm" title="Stop ignoring this pair. It goes back to being checked, and reappears above only if it is still a genuine problem." ' +
+      'onclick="depIgnore(decodeURIComponent(\'' + encodeURIComponent(modId) + '\'), decodeURIComponent(\'' + encodeURIComponent(dependency) + '\'), false)">Restore</button>' +
+      '</div>'
+  }).join('')
+  return '<div class="card" style="margin-bottom:1rem">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">' +
+      '<span class="card-title" style="margin-bottom:0">Ignored dependencies <span class="mono" style="font-size:.78rem;font-weight:400;color:var(--muted)">(' + list.length + ')</span></span>' +
+      '<button class="btn-secondary btn-sm" onclick="showIgnoredDeps()">Hide</button>' +
+    '</div>' +
+    '<p style="font-size:.76rem;color:var(--muted);margin:.6rem 0">Pairs dismissed with <strong>Not required</strong>. They are skipped when dependencies are checked.</p>' +
+    rows + '</div>'
 }
 
 // Clicking a tag chip narrows the table to that type.
@@ -2452,6 +2630,153 @@ function fetchDroppedMods() {
   fetch('/api/collections/dropped').then(function(r) { return r.json() }).then(function(d) {
     renderDroppedMods((d && d.dropped) || [])
   }).catch(function() {})
+}
+
+// --- Mod ID drift (see moddrift.js) ---
+//
+// The wording here is the whole point of the panel. The operator is looking at mods that load
+// perfectly well on the server, so nothing looks broken from here — the damage is only visible to
+// a player trying to join, who gets "Mod ... is not installed [WorkshopID: ]" and bounces. So the
+// card leads with the player-facing symptom, and every button says what it changes before it is
+// pressed: an ID in a list, not a file on disk.
+function fetchModDrift() {
+  fetch('/api/mods/drift').then(function(r) { return r.json() })
+    .then(renderModDrift).catch(function() {})
+}
+
+function driftSafetyBadge(identical) {
+  if (identical === true) return '<span style="color:#3ba55d;font-size:.75rem;white-space:nowrap">Same files — safe</span>'
+  if (identical === false) return '<span style="color:#e05252;font-size:.75rem;white-space:nowrap">Different build — can delete items</span>'
+  return '<span class="text-muted" style="font-size:.75rem;white-space:nowrap">Cannot compare</span>'
+}
+
+function renderModDrift(d) {
+  var el = document.getElementById('mods-drift')
+  if (!el) return
+  var issues = (d && d.issues) || []
+  var stale = (d && d.stale) || []
+  var html = ''
+
+  if (issues.length) {
+    var rows = issues.map(function(i) {
+      var target = (i.suggest || [])[0]
+      var action
+      if (i.kind === 'clientBlocked' && i.suggest.length === 1) {
+        action = '<button class="' + (i.buildsIdentical === false ? 'btn-warn' : 'btn-primary') + ' btn-sm" ' +
+          // JSON.stringify then esc: mod ids carry apostrophes ("GanydeBielovzki's Frockin
+          // Splendor!") which the usual \'...\' inline-handler quoting breaks on.
+          'onclick="repairDrift(' + esc(JSON.stringify(i.id)) + ',' +
+          esc(JSON.stringify(target)) + ',' + (i.buildsIdentical === true) + ')" ' +
+          'title="Changes this mod\'s ID in the server\'s mod list from ' + esc(i.id) + ' to ' + esc(target) + '. No files are downloaded, deleted or moved.">' +
+          'Rename ID' + (i.buildsIdentical === false ? '…' : '') + '</button>'
+      } else if (i.kind === 'clientBlocked') {
+        action = '<span class="text-muted" style="font-size:.75rem">Two Workshop items use this folder — fix by hand</span>'
+      } else if (i.kind === 'localOnly') {
+        action = '<span class="text-muted" style="font-size:.75rem">No Workshop item ships it</span>'
+      } else {
+        action = '<span class="text-muted" style="font-size:.75rem">Not on disk at all</span>'
+      }
+      var to = target
+        ? '<span class="mono" style="font-size:.78rem">' + esc(target) + '</span>'
+        : '<span class="text-muted">—</span>'
+      var where = i.workshopId
+        ? '<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + esc(i.workshopId) + '" target="_blank" class="mono" style="font-size:.75rem">' + esc(i.workshopId) + '</a>'
+        : '<span class="text-muted" style="font-size:.75rem">' + esc(i.folder || '—') + '</span>'
+      return '<tr>' +
+        '<td><span class="mono" style="font-size:.78rem">' + esc(i.id) + '</span></td>' +
+        '<td>' + to + '</td>' +
+        '<td>' + where + '</td>' +
+        '<td>' + (i.kind === 'clientBlocked' ? driftSafetyBadge(i.buildsIdentical) : '') + '</td>' +
+        '<td style="white-space:nowrap">' + action + '</td>' +
+        '</tr>'
+    }).join('')
+
+    html += '<div class="card" style="margin-bottom:1.4rem;border-left:3px solid #e05252">' +
+      '<div class="card-title" style="margin-bottom:.5rem">' + issues.length + ' enabled mod(s) players cannot download</div>' +
+      '<p style="font-size:.8rem;color:var(--muted);margin-bottom:.9rem">' +
+        'These mods load fine <em>on the server</em>, so nothing looks wrong from here — but no Workshop item ' +
+        'publishes their ID any more, usually because the author renamed it. Anyone trying to join is told ' +
+        '<span class="mono" style="font-size:.75rem">Mod "…" is not installed [ModID: …, WorkshopID: ]</span> ' +
+        'and is refused.' +
+      '</p>' +
+      '<p style="font-size:.8rem;color:var(--muted);margin-bottom:.9rem">' +
+        '<strong>Rename ID</strong> changes the ID in the server\'s mod list to the one Steam publishes today. ' +
+        'It downloads nothing, deletes nothing, and leaves load order untouched — the previous list is backed up first. ' +
+        'Restart afterwards to apply.' +
+      '</p>' +
+      '<table><thead><tr><th>ID in mod list</th><th>Should be</th><th>Workshop item</th><th>Safety</th><th></th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table>' +
+      '<div style="display:flex;justify-content:flex-end;margin-top:.9rem">' +
+        '<button class="btn-warn btn-sm" onclick="serverAction(\'restart\')">Restart Server</button>' +
+      '</div></div>'
+  }
+
+  // Report-only, and collapsed: this is where the next drift comes from, but refreshing a stale
+  // copy swaps the build the game loads and PZ discards items the new build no longer defines.
+  // That is a decision, not a button.
+  if (stale.length) {
+    var srows = stale.map(function(t) {
+      return '<tr>' +
+        '<td><span class="mono" style="font-size:.78rem">' + esc(t.folder) + '</span></td>' +
+        '<td class="mono" style="font-size:.78rem">' + esc(t.local || 'none') + '</td>' +
+        '<td class="mono" style="font-size:.78rem">' + esc(t.workshop) + '</td>' +
+        '<td><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=' + esc(t.workshopId) + '" target="_blank" class="mono" style="font-size:.75rem">' + esc(t.workshopId) + '</a></td>' +
+        '</tr>'
+    }).join('')
+    html += '<div class="card" style="margin-bottom:1.4rem">' +
+      '<details><summary style="cursor:pointer;font-size:.9rem;color:var(--muted)">' +
+        stale.length + ' stale duplicate mod cop(ies) <span style="opacity:.75">— not in use, no action needed</span></summary>' +
+      '<p style="font-size:.8rem;color:var(--muted);margin:.9rem 0">' +
+        'Every mod exists twice: SteamCMD\'s download under <span class="mono" style="font-size:.75rem">install/</span>, ' +
+        'and a copy the manager keeps under <span class="mono" style="font-size:.75rem">&lt;data&gt;/mods</span>. ' +
+        'An auto-update refreshes the download but not that second copy, so these have fallen behind.' +
+      '</p>' +
+      '<p style="font-size:.8rem;color:var(--muted);margin-bottom:.9rem">' +
+        '<strong>The game is not loading these.</strong> When a mod folder exists in both places the ' +
+        '<span class="mono" style="font-size:.75rem">install/</span> copy wins, so the server is already running the ' +
+        'current build of every mod listed here. They are dead weight, not a live problem.' +
+      '</p>' +
+      '<p style="font-size:.8rem;color:var(--muted);margin-bottom:.9rem">' +
+        'They are worth watching for one reason: if a mod ever ends up present <em>only</em> in ' +
+        '<span class="mono" style="font-size:.75rem">&lt;data&gt;/mods</span>, the stale copy becomes what loads — and ' +
+        'no client can download it, which is the "not installed [WorkshopID: ]" failure above. No button, because ' +
+        'refreshing one swaps the build the game would load and Project Zomboid deletes items a newer build no longer defines.' +
+      '</p>' +
+      '<table><thead><tr><th>Mod folder</th><th>Server has</th><th>Workshop has</th><th>Item</th></tr></thead>' +
+      '<tbody>' + srows + '</tbody></table>' +
+      '</details></div>'
+  }
+
+  el.innerHTML = html
+}
+
+function repairDrift(from, to, identical) {
+  var msg = 'Rename "' + from + '" to "' + to + '" in the server\'s mod list?\n\n' +
+    'What this changes: one ID in the mod list.\n' +
+    'What it does NOT change: no files are downloaded, deleted or moved, and load order stays the same.\n' +
+    'The current mod list is backed up first.\n\n'
+  msg += identical
+    ? 'The server\'s copy and the Workshop copy of this mod are identical apart from the ID, so nothing in your world changes.'
+    : 'WARNING: the server\'s copy and the Workshop copy are DIFFERENT BUILDS. After this the game loads the ' +
+      'Workshop build, and Project Zomboid permanently deletes any item whose ID that build no longer defines — ' +
+      'from player inventories, containers and vehicles alike. Back up your save first if you are unsure.'
+  msg += '\n\nRestart the server afterwards to apply.'
+  if (!confirm(msg)) return
+
+  fetch('/api/mods/drift/repair', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ remaps: [{ from: from, to: to }], acceptItemLoss: !identical })
+  }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(res) {
+      if (!res.ok) {
+        showMsg('mods-msg', 'Error: ' + (res.d.error || 'repair refused'), 'error')
+        return
+      }
+      showMsg('mods-msg', 'Renamed ' + from + ' to ' + to + '. Restart to apply. Previous mod list saved as ' + res.d.backup + '.', 'success')
+      fetchModDrift(); fetchMods(); fetchDependencies()
+    })
+    .catch(function() { showMsg('mods-msg', 'Could not apply the rename', 'error') })
 }
 
 function renderDroppedMods(dropped) {
@@ -2631,6 +2956,169 @@ function saveAutoSync() {
       showMsg('mods-msg', enabled ? 'Auto-sync on — checking every ' + intervalHours + 'h.' : 'Auto-sync off.', 'success', 4000)
     })
     .catch(function() {})
+}
+
+// --- Excluded mod folders, and duplicate mod ids ---
+//
+// One Workshop item can ship several mod folders, and two of them can declare the same mod id.
+// PZ then loads whichever it scans first, so the server comes up differently on consecutive
+// restarts. Nothing else in this UI can show that: the mods table is keyed by mod id, and the
+// colliding folders collapse into one row. This panel is folder-level on purpose.
+function fetchExcludes() {
+  fetch('/api/mods/excludes').then(function(r) { return r.json() }).then(function(d) {
+    renderExcludes(d.duplicates || [], d.excludes || {})
+  }).catch(function() {})
+}
+
+function renderExcludes(duplicates, excludes) {
+  var el = document.getElementById('mods-excludes')
+  if (!el) return
+  var html = ''
+
+  if (duplicates.length) {
+    html += '<div class="card"><div class="card-title" style="color:#e74c3c">' +
+      duplicates.length + ' mod ID' + (duplicates.length > 1 ? 's are' : ' is') + ' claimed by more than one folder</div>' +
+      '<p class="text-muted" style="font-size:.82rem;margin:.2rem 0 .9rem">' +
+      'The server loads whichever folder it scans first, so it boots differently each restart. ' +
+      'Exclude the folder you do not want and it stays gone through every future download.</p>'
+    html += duplicates.map(function(d) {
+      return '<div style="margin-bottom:.8rem">' +
+        '<div class="mono" style="font-size:.85rem;margin-bottom:.35rem">' + esc(d.modId) + '</div>' +
+        d.providers.map(function(p) {
+          return '<div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin:.2rem 0 .2rem 1rem">' +
+            '<span class="mono" style="font-size:.76rem">' + esc(p.workshopId) + ' / ' + esc(p.folder) + '</span>' +
+            '<button class="btn-secondary btn-sm" onclick="excludeFolder(decodeURIComponent(\'' + encodeURIComponent(p.workshopId) + '\'), decodeURIComponent(\'' + encodeURIComponent(p.folder) + '\'))">Exclude this folder</button>' +
+            '</div>'
+        }).join('') +
+        '</div>'
+    }).join('')
+    html += '</div>'
+  }
+
+  var rows = []
+  Object.keys(excludes).forEach(function(wid) {
+    (excludes[wid] || []).forEach(function(folder) { rows.push({ workshopId: wid, folder: folder }) })
+  })
+  if (rows.length) {
+    html += '<div class="card"><div class="card-title">Excluded mod folders</div>' +
+      '<p class="text-muted" style="font-size:.82rem;margin:.2rem 0 .9rem">' +
+      'Deleted again after every download and before every start. Removing an entry here does not ' +
+      'bring the folder back, it returns on the next download or reinstall of that item.</p>' +
+      rows.map(function(r) {
+        return '<div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin:.25rem 0">' +
+          '<span class="mono" style="font-size:.78rem">' + esc(r.workshopId) + ' / ' + esc(r.folder) + '</span>' +
+          '<button class="btn-secondary btn-sm" onclick="unexcludeFolder(decodeURIComponent(\'' + encodeURIComponent(r.workshopId) + '\'), decodeURIComponent(\'' + encodeURIComponent(r.folder) + '\'))">Stop excluding</button>' +
+          '</div>'
+      }).join('') + '</div>'
+  }
+
+  el.innerHTML = html
+}
+
+function excludeFolder(workshopId, folder, force) {
+  if (!force && !confirm('Exclude "' + folder + '" from Workshop item ' + workshopId + '?\n\n' +
+    'Its files are deleted now and after every future download. Restart the server to apply.')) return
+  fetch('/api/mods/excludes', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workshopId: workshopId, folder: folder, force: !!force })
+  })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(res) {
+      // 409 means the exclusion would leave a mod enabled in Mods= with nothing to load. That is
+      // the state that makes PZ drop the mod's items from the save, so it is confirmed explicitly
+      // rather than waved through.
+      if (!res.ok && res.d.orphaned) {
+        if (confirm(res.d.error + '\n\nExclude it anyway?')) return excludeFolder(workshopId, folder, true)
+        return
+      }
+      if (!res.ok) throw new Error(res.d.error || 'unknown error')
+      showMsg('mods-msg', 'Excluded ' + folder + '. Removed ' + (res.d.removed || []).length + ' copy(ies). Restart the server to apply.', 'success', 8000)
+      fetchExcludes(); fetchMods(); fetchAudit()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Error: ' + e.message, 'error') })
+}
+
+function unexcludeFolder(workshopId, folder) {
+  if (!confirm('Stop excluding "' + folder + '"?\n\nThe folder is not restored now, it comes back the next time this item downloads.')) return
+  fetch('/api/mods/excludes', {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workshopId: workshopId, folder: folder })
+  })
+    .then(function(r) { return r.json() })
+    .then(function(d) {
+      if (!d.success) throw new Error(d.error || 'unknown error')
+      showMsg('mods-msg', 'No longer excluding ' + folder + '.', 'success', 6000)
+      fetchExcludes()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Error: ' + e.message, 'error') })
+}
+
+// --- Clean reinstall ---
+//
+// Long-running, and it takes the server down partway through, so the button only starts it and
+// everything after that is read back from GET /api/mods/reinstall.
+var reinstallPoll = null
+
+function reinstallMod(workshopId) {
+  if (!confirm('Reinstall Workshop item ' + workshopId + ' from Steam?\n\n' +
+    'The server keeps running during the download, then stops while the files are swapped and ' +
+    'starts again. The old files are kept so a failure can be rolled back.\n\n' +
+    'Do this with nobody connected.')) return
+  fetch('/api/mods/' + workshopId + '/reinstall', { method: 'POST' })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d } }) })
+    .then(function(res) {
+      if (!res.ok) throw new Error(res.d.error || 'unknown error')
+      showMsg('mods-msg', 'Reinstalling ' + workshopId + '...', 'info', 6000)
+      pollReinstall()
+    })
+    .catch(function(e) { showMsg('mods-msg', 'Error: ' + e.message, 'error') })
+}
+
+function pollReinstall() {
+  if (reinstallPoll) clearInterval(reinstallPoll)
+  fetchReinstall()
+  reinstallPoll = setInterval(fetchReinstall, 5000)
+}
+
+function fetchReinstall() {
+  fetch('/api/mods/reinstall').then(function(r) { return r.json() }).then(function(d) {
+    var el = document.getElementById('mods-reinstall')
+    if (!el) return
+    var st = d.state
+    if (!st) { el.innerHTML = ''; return }
+
+    if (d.busy) {
+      el.innerHTML = '<div class="card"><div class="card-title">Reinstalling ' + esc(st.workshopId) + '</div>' +
+        '<div style="font-size:.85rem">' + esc(st.step) + '...</div>' +
+        '<p class="text-muted" style="font-size:.78rem;margin-top:.5rem">' +
+        'Scheduled restarts and mod auto-updates are paused until this finishes.</p></div>'
+      if (!reinstallPoll) pollReinstall()
+      return
+    }
+
+    if (reinstallPoll) { clearInterval(reinstallPoll); reinstallPoll = null }
+
+    if (st.ok) {
+      el.innerHTML = '<div class="card"><div class="card-title" style="color:#2ecc71">Reinstalled ' + esc(st.workshopId) + '</div>' +
+        '<div style="font-size:.85rem">Files replaced and the server is starting.' +
+        ((st.addedModIds || []).length ? ' New mod id(s) added to the end of the load order: ' + esc(st.addedModIds.join(', ')) + '.' : '') +
+        '</div></div>'
+      return
+    }
+
+    // The one outcome that needs a person: the swap failed and could not be undone, so the server
+    // is stopped on purpose rather than booting a world whose Mods= names files that are not there.
+    var stranded = st.strandedDown
+    el.innerHTML = '<div class="card"><div class="card-title" style="color:#e74c3c">' +
+      (stranded ? 'Reinstall failed, server deliberately left stopped' : 'Reinstall of ' + esc(st.workshopId) + ' failed') + '</div>' +
+      '<div style="font-size:.85rem">' + esc(st.error || 'unknown error') + '</div>' +
+      (stranded
+        ? '<p style="font-size:.82rem;margin-top:.6rem">Starting the server now would load the world without this mod, which permanently removes its items from every character and container. ' +
+          'The old files are in <span class="mono">' + esc(st.quarantine || '') + '</span> and must be restored before starting.</p>'
+        : '<p class="text-muted" style="font-size:.82rem;margin-top:.6rem">' +
+          (st.rolledBack ? 'Rolled back, and the server is starting again.' : 'The server was not stopped and nothing changed.') + '</p>') +
+      '</div>'
+  }).catch(function() {})
 }
 
 function removeMod(workshopId) {
