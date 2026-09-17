@@ -19,6 +19,20 @@ const { makeState: makePlayerState, applyLine: applyPlayerLine, replay: replayPl
 const auth = require('./src/auth')
 const archive = require('./src/services/archive')
 const { qs, header, installErrorHandler, installProcessGuards } = require('./src/http')
+const docker = require('./src/infra/docker')
+const disk = require('./src/infra/disk')
+const db = require('./src/infra/db')
+const { humanBytes } = disk
+const { ACCESS_LEVELS } = db
+const whitelist = require('./src/services/whitelist')
+const {
+  readIni, getIniList, setIniList, getIniValue, setIniValue, getFullIni, CONFIG_FIELDS, INI_KEY_RE,
+} = require('./src/domain/ini')
+const {
+  iniPath, modsDir, dbPath, logDir, schedPath, workshopContent, installContent, backupDirs,
+  collectionsPath, queuePath, excludesPath, reinstallDir, modOrderBackupDir, depIgnorePath,
+  autoUpdatePath, autoSyncPath, sandboxPath,
+} = require('./src/paths')
 
 installProcessGuards()
 
@@ -80,22 +94,14 @@ function writeServerConfig(cfg) {
 // Every container on the box right now, name -> state. Returns null (not an empty map) if
 // docker can't be reached, so a transient failure never prunes the whole registry.
 function liveContainers() {
-  try {
-    const out = execSync('docker ps -a --format "{{.Names}}|{{.State}}"').toString().trim()
-    if (!out) return new Map()
-    return new Map(out.split('\n').filter(Boolean).map(l => {
-      const [name, state] = l.split('|')
-      return [name, state || 'unknown']
-    }))
-  } catch { return null }
+  const all = docker.psAll()
+  return all ? new Map(Object.entries(all)) : null
 }
 
 // This container's own bind mounts, so we know which host-side paths we can actually read.
 function ownMounts() {
-  try {
-    const id = execSync('hostname').toString().trim()
-    return JSON.parse(execSync('docker inspect ' + id + ' --format "{{json .Mounts}}"', { maxBuffer: 4 * 1024 * 1024 }).toString())
-  } catch { return [] }
+  const id = docker.ownId()
+  return id ? docker.mounts(id) : []
 }
 
 // Auto-detects any running/stopped PZ dedicated-server container this manager can actually
@@ -109,15 +115,12 @@ function discoverServers() {
   // The server's force_install_dir. Optional: a manager without this mount still manages the
   // server, it just can't reinstall — see installContent().
   const installMounts = mine.filter(m => /^\/pz-install\d*$/.test(m.Destination))
-  let names = []
-  try {
-    names = execSync('docker ps -a --filter ancestor=' + PZ_IMAGE + ' --format "{{.Names}}"').toString().trim().split('\n').filter(Boolean)
-  } catch { return {} }
+  const names = docker.psByImage(PZ_IMAGE)
 
   const found = {}
   for (const name of names) {
     try {
-      const mounts = JSON.parse(execSync('docker inspect ' + name + ' --format "{{json .Mounts}}"', { maxBuffer: 4 * 1024 * 1024 }).toString())
+      const mounts = docker.mounts(name)
       const dataMount = mounts.find(m => m.Destination === '/home/steam/Zomboid')
       if (!dataMount) continue
       const ourData = dataMounts.find(m => m.Source === dataMount.Source)
@@ -238,50 +241,10 @@ app.use('/api', (req, res, next) => {
   res.status(404).json({ error: 'Unknown server "' + id + '" — it may have been removed.', code: 'UNKNOWN_SERVER' })
 })
 
-// Per-server derived paths
-function iniPath(s)   { return s.data + '/Server/servertest.ini' }
-function modsDir(s)   { return s.data + '/mods' }
-function dbPath(s)    { return s.data + '/db/servertest.db' }
-function logDir(s)    { return s.data + '/Logs' }
-function schedPath(s) { return s.data + '/schedule.json' }
-function workshopContent(s) { return s.workshop + '/content/108600' }
-// The only tree the game actually loads from — SteamCMD's force_install_dir. The manager needs it
-// mounted read-write to purge an item while the server is down; `docker exec` can't reach a
-// stopped container. Null when unmounted: everything else still works, reinstall refuses.
-function installContent(s) { return s.install ? s.install + '/steamapps/workshop/content/108600' : null }
-function backupDirs(s) {
-  return {
-    startup: s.data + '/backups/startup',
-    version: s.data + '/backups/version',
-    manual:  s.data + '/backups/manual',
-  }
-}
 
 // Notifications config stays global (one Pushover account for the whole box)
 const NOTIF_PATH = '/pz-data/notifications.json'
 
-// --- INI helpers ---
-function readIni(s) { return fs.readFileSync(iniPath(s), 'utf8') }
-function getIniList(s, key) {
-  const m = readIni(s).match(new RegExp(`^${key}=(.*)$`, 'm'))
-  return m ? m[1].split(';').filter(Boolean) : []
-}
-function setIniList(s, key, values) {
-  const ini = readIni(s).replace(new RegExp(`^${key}=.*$`, 'm'), `${key}=${values.join(';')}`)
-  fs.writeFileSync(iniPath(s), ini)
-}
-
-// --- INI single-value helpers ---
-function getIniValue(s, key, def) {
-  const m = readIni(s).match(new RegExp('^' + key + '=(.*)$', 'm'))
-  return m ? m[1].trim() : (def !== undefined ? def : '')
-}
-function setIniValue(s, key, value) {
-  const ini = readIni(s)
-  const re = new RegExp('^' + key + '=.*$', 'm')
-  const line = key + "=" + value
-  fs.writeFileSync(iniPath(s), re.test(ini) ? ini.replace(re, line) : ini + "\n" + line)
-}
 
 // --- Workshop helpers ---
 // The first mod.info in the folder, root before version subfolders. Good enough to answer "is
@@ -429,24 +392,6 @@ function installedModMeta(s) {
   return out
 }
 
-// --- DB helpers ---
-function dbAll(s, sql) {
-  try {
-    const out = execSync('sqlite3 -json "' + dbPath(s) + '" ' + JSON.stringify(sql))
-    return JSON.parse(out.toString().trim() || '[]')
-  } catch { return [] }
-}
-function dbRun(s, sql) {
-  execSync('sqlite3 "' + dbPath(s) + '" ' + JSON.stringify(sql))
-}
-function sanitizeUsername(u) { return u && /^[\w. -]{1,50}$/.test(u) }
-const ACCESS_LEVELS = ['none', 'observer', 'gm', 'overseer', 'moderator', 'admin']
-
-// B42 replaced the flat admin/moderator/banned/accesslevel columns with a role table
-const B42_ROLE = { none: 2, user: 2, observer: 4, gm: 5, overseer: 5, moderator: 6, admin: 7, banned: 1 }
-function isB42Db(s) {
-  return dbAll(s, "SELECT 1 FROM pragma_table_info('whitelist') WHERE name='role'").length > 0
-}
 
 // --- Notification helpers ---
 // Credentials come from the environment, never from this file. The two that used to sit here were
@@ -605,12 +550,13 @@ const VERSION_TTL = 5 * 60 * 1000
 function getServerVersion(s, cb) {
   const cached = versionCache[s.id]
   if (cached && Date.now() - cached.at < VERSION_TTL) return cb(cached.version)
-  exec('docker inspect ' + s.container + ' --format "{{.State.StartedAt}}"', (e1, startedAt) => {
+  docker.inspect(s.container, '{{.State.StartedAt}}', (e1, startedAt) => {
     const since = (startedAt || '').trim()
-    // --since scopes it to the current run so a restart picks up a changed version; head caps
-    // the read regardless of how long the server has been up.
-    const cmd = 'docker logs ' + s.container + (since ? ' --since ' + since : '') + ' 2>&1 | head -n 2000'
-    exec(cmd, { maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+    // --since scopes it to the current run so a restart picks up a changed version. The read used
+    // to be capped with `| head -n 2000`; the cap is now applied to the text, which does the same
+    // job without a shell and without the pipe's broken-pipe race on a long log.
+    docker.logs(s.container, since ? ['--since', since] : [], { maxBuffer: 8 * docker.MB }, (err, full) => {
+      const out = full.split('\n', 2000).join('\n')
       const m = (out || '').match(/\bversion=(\d[\w.]*)/)
       const version = m ? m[1] : (cached ? cached.version : '')
       if (version && (!cached || cached.version !== version)) logFor(s, 'detected PZ version ' + version)
@@ -628,9 +574,8 @@ function updateDiscordStatus(cb) {
   const wh = parseWebhookUrl(cfg.discord.webhookUrl)
   if (!wh) return cb && cb()
   const servers = allServers()
-  const names = servers.map(s => s.container).join(' ')
   getExternalIp(externalIp => {
-    exec('docker inspect ' + names + ' --format "{{.Name}}|{{.State.Status}}|{{.State.StartedAt}}"', (err, out) => {
+    docker.inspect(servers.map(x => x.container), '{{.Name}}|{{.State.Status}}|{{.State.StartedAt}}', (err, out) => {
       const states = {}
       for (const line of (out || '').trim().split('\n')) {
         const [name, status, startedAt] = line.replace(/^\//, '').split('|')
@@ -810,7 +755,7 @@ function markAwaitingReady(s, alreadyRunning) {
 // Crash monitor
 setInterval(() => {
   for (const s of allServers()) {
-    exec('docker inspect ' + s.container + ' --format "{{.State.Status}}"', (err, out) => {
+    docker.inspect(s.container, '{{.State.Status}}', (err, out) => {
       const status = (out || '').trim()
       const st = mstate(s)
       const cfg = readNotifConfig()
@@ -839,13 +784,14 @@ setInterval(() => {
       console.log('[ready] ' + serverLabel(s) + ': gave up waiting for the ready marker')
       continue
     }
-    exec('docker inspect ' + s.container + ' --format "{{.State.StartedAt}}"', (e1, startedAt) => {
+    docker.inspect(s.container, '{{.State.StartedAt}}', (e1, startedAt) => {
       const since = (startedAt || '').trim()
       if (!since) return
-      // -t so the marker carries the moment it was printed — see ready.js.
-      exec('docker logs -t ' + s.container + ' --since ' + since + ' 2>&1 | grep -F ' + JSON.stringify(SERVER_READY_MARKER) + ' | tail -1',
-        { maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
-          const verdict = readyCheck({ startedAt: since, readyMinStart: st.readyMinStart, markerLine: out })
+      // -t so the marker carries the moment it was printed — see ready.js. The match and the
+      // "last one wins" are done on the text rather than by `| grep -F ... | tail -1`.
+      docker.logsContaining(s.container, ['-t', '--since', since], SERVER_READY_MARKER,
+        { maxBuffer: 4 * docker.MB }, (err, lines) => {
+          const verdict = readyCheck({ startedAt: since, readyMinStart: st.readyMinStart, markerLine: lines[lines.length - 1] })
           if (!verdict.ready) return
           if (!st.awaitingReady) return   // another tick won the race
           st.awaitingReady = false
@@ -889,12 +835,13 @@ function reportModDrift(s) {
 // and the boot log can. Runs once the ready marker is up, because by then the mod phase is over and
 // the log is complete for this run.
 //
-// grep exits 1 with no output when nothing matched, which reconcileMods reads as "no information"
-// rather than "every mod is dead", so a failed or truncated read stays silent instead of paging.
+// An empty result means "no information" to reconcileMods, not "every mod is dead", so a failed or
+// truncated read stays silent instead of paging. That was true of `grep`'s exit 1 and stays true of
+// filtering the text: both hand back nothing.
 function reportDeadMods(s, since) {
-  exec('docker logs ' + s.container + ' --since ' + since + ' 2>&1 | grep -F "> loading "',
-    { maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
-      const r = reconcileMods(getIniList(s, 'Mods'), out)
+  docker.logsContaining(s.container, ['--since', since], '> loading ',
+    { maxBuffer: 8 * docker.MB }, (err, lines) => {
+      const r = reconcileMods(getIniList(s, 'Mods'), lines.join('\n'))
       if (!r.known) return
       if (!r.dead.length) {
         console.log('[mods] ' + serverLabel(s) + ': all ' + r.loaded.length + ' enabled mods loaded')
@@ -915,16 +862,16 @@ let lowDiskAlerted = false
 setInterval(() => {
   const cfg = readNotifConfig()
   if (!cfg.enabled || !cfg.events || !cfg.events.lowDisk) return
-  exec('df -hP /workshop 2>/dev/null | tail -1', (err, out) => {
-    const cols = (out || '').trim().split(/\s+/)
-    const availStr = cols[3] || ''
-    const val = parseFloat(availStr)
-    const unit = availStr.replace(/[\d.]/g, '').toUpperCase()
-    const availGB = unit === 'G' ? val : unit === 'M' ? val / 1024 : unit === 'T' ? val * 1024 : 0
+  disk.df('/workshop', cols => {
+    const availStr = cols.avail
+    // The threshold comparison reads the real figure rather than re-parsing df's suffix. The old
+    // parse understood only G, M and T, and answered 0 for anything else — so on a filesystem
+    // reporting K or P the alert silently never fired, which is exactly when it would matter.
+    const availGB = disk.freeBytes('/workshop') / (1024 * 1024 * 1024)
     const threshold = cfg.lowDiskThresholdGB || 5
     if (availGB > 0 && availGB < threshold && !lowDiskAlerted) {
       lowDiskAlerted = true
-      pushover('PZ Server: Low Disk Space', availStr + ' remaining on server (' + (cols[4] || '') + ' used). Free up space before it fills.')
+      pushover('PZ Server: Low Disk Space', availStr + ' remaining on server (' + cols.pct + ' used). Free up space before it fills.')
     } else if (availGB >= threshold) {
       lowDiskAlerted = false
     }
@@ -937,7 +884,7 @@ setInterval(() => {
   for (const s of allServers()) {
     const st = mstate(s)
     if (!cfg.enabled || !cfg.events || !cfg.events.downloadComplete) { st.wasDownloading = false; continue }
-    exec('docker logs ' + s.container + ' --tail 500 2>&1', { maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
+    docker.logs(s.container, ['--tail', '500'], { maxBuffer: 4 * docker.MB }, (err, out) => {
       const active = parseDownloads((out || '').split('\n'))
       const isDownloading = active.length > 0
       if (st.wasDownloading && !isDownloading) {
@@ -1171,7 +1118,7 @@ function saveThen(s, next) {
 function bringUp(s, action, timeout, cb) {
   try { applyExcludes(s) }
   catch (e) { console.error('[excludes] sweep failed for ' + s.name + ':', e.message) }
-  exec('docker ' + action + ' ' + s.container, { timeout }, cb)
+  docker.control(action, s.container, timeout, cb)
 }
 
 function sendIngameMsg(s, msg) {
@@ -1369,9 +1316,9 @@ app.delete('/api/servers/:id', (req, res) => {
 
 app.get('/api/status', (req, res) => {
   const s = srv(req)
-  exec('docker inspect ' + s.container + ' --format "{{.State.Status}}|{{.State.StartedAt}}"', (err, out) => {
+  docker.inspect(s.container, '{{.State.Status}}|{{.State.StartedAt}}', (err, out) => {
     if (err) return res.json({ status: 'unknown' })
-    const [status, startedAt] = out.trim().split('|')
+    const [status, startedAt] = out.split('|')
     res.json({ status, startedAt, server: s.id })
   })
 })
@@ -1394,7 +1341,7 @@ app.post('/api/server/stop', (req, res) => {
   const s = srv(req)
   logFor(s, 'stop requested via UI')
   mstate(s).intentionalStop = true
-  saveThen(s, () => exec('docker stop ' + s.container, { timeout: 60000 }, (err) => {
+  saveThen(s, () => docker.control('stop', s.container, 60000, (err) => {
     const ok = !err
     if (ok) {
       const cfg = readNotifConfig()
@@ -1446,7 +1393,7 @@ function streamContainerLogs(res, container, tailArg) {
   res.setHeader('Connection', 'keep-alive')
   res.flushHeaders()
   const tail = Math.min(parseInt(tailArg) || 300, 2000)
-  const child = spawn('docker', ['logs', container, '--tail', String(tail), '--follow', '--timestamps'])
+  const child = docker.logStream(container, tail)
   const send = l => { if (l.trim()) res.write('data: ' + JSON.stringify(l) + '\n\n') }
   child.stdout.on('data', d => d.toString().split('\n').forEach(send))
   child.stderr.on('data', d => d.toString().split('\n').forEach(send))
@@ -1460,9 +1407,7 @@ app.get('/api/logs', (req, res) => {
 
 // This manager's own container id. Inside Docker, `hostname` is the short container id, which
 // `docker logs` accepts — the same trick ownMounts() uses to find our own bind mounts.
-function ownContainerId() {
-  try { return execSync('hostname').toString().trim() } catch { return '' }
-}
+function ownContainerId() { return docker.ownId() }
 
 // The manager's own output: Express request errors, SteamCMD launch failures, download
 // reconciliation, collection auto-sync, RCON and schedule activity. Separate from the PZ server
@@ -1477,27 +1422,17 @@ app.get('/api/manager-logs', (req, res) => {
 // ===== PLAYERS / WHITELIST =====
 
 app.get('/api/players', (req, res) => {
-  const s = srv(req)
-  const players = isB42Db(s)
-    ? dbAll(s, "SELECT w.username, COALESCE(r.name,'user') AS accesslevel, (COALESCE(r.name,'')='admin') AS admin, (COALESCE(r.name,'')='moderator') AS moderator, (COALESCE(r.name,'')='banned') AS banned, w.lastConnection, w.displayName FROM whitelist w LEFT JOIN role r ON r.id = w.role ORDER BY w.lastConnection DESC")
-    : dbAll(s, 'SELECT username, accesslevel, admin, moderator, banned, lastConnection, displayName FROM whitelist ORDER BY lastConnection DESC')
-  res.json({ players })
+  res.json({ players: whitelist.list(srv(req)) })
 })
 
 app.post('/api/players', (req, res) => {
   const s = srv(req)
-  const { username, accesslevel = 'none' } = req.body
-  if (!sanitizeUsername(username)) return res.status(400).json({ error: 'Invalid username' })
+  const { username, accesslevel = 'none' } = req.body || {}
+  if (!db.validUsername(username)) return res.status(400).json({ error: 'Invalid username' })
   if (!ACCESS_LEVELS.includes(accesslevel)) return res.status(400).json({ error: 'Invalid accesslevel' })
-  const u = username.replace(/'/g, "''")
-  const isAdmin = accesslevel === 'admin' ? 1 : 0
-  const isMod = accesslevel === 'moderator' ? 1 : 0
   try {
-    if (isB42Db(s)) {
-      dbRun(s, 'INSERT OR IGNORE INTO whitelist (username, role, world) VALUES (\'' + u + '\', ' + (B42_ROLE[accesslevel] || 2) + ', \'servertest\')')
-    } else {
-      dbRun(s, 'INSERT OR IGNORE INTO whitelist (username, accesslevel, admin, moderator, banned, world) VALUES (\'' + u + '\', \'' + accesslevel + '\', ' + isAdmin + ', ' + isMod + ', 0, \'servertest\')')
-    }
+    whitelist.add(s, username, accesslevel)
+    logFor(s, 'whitelisted "' + username + '" as ' + accesslevel)
     res.json({ success: true })
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
@@ -1505,32 +1440,14 @@ app.post('/api/players', (req, res) => {
 app.patch('/api/players/:username', (req, res) => {
   const s = srv(req)
   const { username } = req.params
-  if (!sanitizeUsername(username)) return res.status(400).json({ error: 'Invalid username' })
-  const { accesslevel, banned } = req.body
-  const u = username.replace(/'/g, "''")
-  if (isB42Db(s)) {
-    // B42: bans and access levels are both roles
-    let role
-    if (banned !== undefined) role = banned ? B42_ROLE.banned : B42_ROLE.none
-    if (accesslevel !== undefined) {
-      if (!ACCESS_LEVELS.includes(accesslevel)) return res.status(400).json({ error: 'Invalid accesslevel' })
-      role = B42_ROLE[accesslevel] || B42_ROLE.none
-    }
-    if (role === undefined) return res.status(400).json({ error: 'Nothing to update' })
-    try {
-      dbRun(s, 'UPDATE whitelist SET role=' + role + ' WHERE username=\'' + u + '\'')
-      return res.json({ success: true })
-    } catch (e) { return res.status(500).json({ error: e.message }) }
-  }
-  const fields = []
-  if (accesslevel !== undefined) {
-    if (!ACCESS_LEVELS.includes(accesslevel)) return res.status(400).json({ error: 'Invalid accesslevel' })
-    fields.push('accesslevel=\'' + accesslevel + '\'', 'admin=' + (accesslevel === 'admin' ? 1 : 0), 'moderator=' + (accesslevel === 'moderator' ? 1 : 0))
-  }
-  if (banned !== undefined) fields.push('banned=' + (banned ? 1 : 0))
-  if (!fields.length) return res.status(400).json({ error: 'Nothing to update' })
+  if (!db.validUsername(username)) return res.status(400).json({ error: 'Invalid username' })
+  const { accesslevel, banned } = req.body || {}
   try {
-    dbRun(s, 'UPDATE whitelist SET ' + fields.join(', ') + ' WHERE username=\'' + u + '\'')
+    const r = whitelist.update(s, username, { accesslevel, banned })
+    if (r.ok !== true) return res.status(400).json({ error: r.error })
+    logFor(s, 'updated "' + username + '"' +
+      (accesslevel !== undefined ? ' accesslevel=' + accesslevel : '') +
+      (banned !== undefined ? (banned ? ' banned' : ' unbanned') : ''))
     res.json({ success: true })
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
@@ -1538,10 +1455,10 @@ app.patch('/api/players/:username', (req, res) => {
 app.delete('/api/players/:username', (req, res) => {
   const s = srv(req)
   const { username } = req.params
-  if (!sanitizeUsername(username)) return res.status(400).json({ error: 'Invalid username' })
-  const u = username.replace(/'/g, "''")
+  if (!db.validUsername(username)) return res.status(400).json({ error: 'Invalid username' })
   try {
-    dbRun(s, 'DELETE FROM whitelist WHERE username=\'' + u + '\'')
+    whitelist.remove(s, username)
+    logFor(s, 'removed "' + username + '" from the whitelist')
     res.json({ success: true })
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
@@ -1691,7 +1608,6 @@ function getTitles(ids, cb) {
 // --- Collections registry (persisted per server) ---
 // Tracks which collections were installed here so they can be listed, re-synced (to pick up
 // items added to the collection upstream), and removed.
-function collectionsPath(s) { return s.data + '/collections.json' }
 function readCollections(s) {
   try { return JSON.parse(fs.readFileSync(collectionsPath(s), 'utf8')) } catch { return [] }
 }
@@ -1710,7 +1626,6 @@ function upsertCollection(s, entry) {
 // --- Download queue (persisted — survives a mod-manager container restart) ---
 // One JSON array per server: { id, source, collectionId, status: 'queued'|'installed'|'failed',
 // queuedAt, updatedAt, error, modIds, copiedFolders }
-function queuePath(s) { return s.data + '/download-queue.json' }
 function readQueue(s) {
   try { return JSON.parse(fs.readFileSync(queuePath(s), 'utf8')) } catch { return [] }
 }
@@ -1740,7 +1655,6 @@ function hasModContent(s, workshopId) {
 // See excludes.js for why this exists. Short version: a Workshop item can ship a folder that
 // breaks the server, Steam re-ships it on every download, and the only durable answer is to
 // delete it again after each one.
-function excludesPath(s) { return s.data + '/mod-excludes.json' }
 function readExcludes(s) {
   try {
     const v = JSON.parse(fs.readFileSync(excludesPath(s), 'utf8'))
@@ -1815,11 +1729,15 @@ function registerInstalledMod(s, workshopId, opts) {
     } catch (e) { console.error('[install] force mirror failed for ' + workshopId + ':', e.message) }
   } else {
     try {
-      execSync('docker exec ' + s.container + ' sh -c ' + JSON.stringify(
-        'cp -rn /home/steam/pz-dedicated/steamapps/workshop/content/108600/' + workshopId +
-        ' /home/steam/Steam/steamapps/workshop/content/108600/ 2>/dev/null; true'
-      ), { timeout: 30000 })
-    } catch (e) {}
+      // `sh -c` with the id passed as $1 rather than spliced into the script: the id is validated
+      // digits at every entry point, and this keeps it that way even if one day it is not.
+      docker.execInSync(s.container, ['sh', '-c',
+        'cp -rn /home/steam/pz-dedicated/steamapps/workshop/content/108600/"$1" ' +
+        '/home/steam/Steam/steamapps/workshop/content/108600/ 2>/dev/null; true',
+        'sh', workshopId], { timeout: 30000 })
+    } catch (e) {
+      console.error('[install] mirror copy inside ' + s.container + ' failed for ' + workshopId + ': ' + e.message)
+    }
   }
 
   const dir = path.join(itemDest, 'mods')
@@ -1864,10 +1782,11 @@ function registerInstalledMod(s, workshopId, opts) {
 function steamcmdDownload(s, workshopIds, source, collectionId) {
   if (!workshopIds.length) return
   queueAdd(s, workshopIds, source, collectionId)
-  const items = workshopIds.map(id => '+workshop_download_item 108600 ' + id).join(' ')
-  const cmd = 'docker exec -d ' + s.container + ' /home/steam/steamcmd/steamcmd.sh +force_install_dir /home/steam/pz-dedicated +login anonymous ' + items + ' +quit'
+  const items = workshopIds.flatMap(id => ['+workshop_download_item', '108600', id])
+  const argv = ['/home/steam/steamcmd/steamcmd.sh', '+force_install_dir', '/home/steam/pz-dedicated',
+    '+login', 'anonymous', ...items, '+quit']
   logFor(s, 'SteamCMD: downloading ' + workshopIds.length + ' item(s) [' + workshopIds.slice(0, 8).join(', ') + (workshopIds.length > 8 ? ', ...' : '') + '] source=' + source)
-  exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
+  docker.execInDetached(s.container, argv, { timeout: 15000 }, (err, stdout, stderr) => {
     if (err) {
       console.error('[download] failed to start for ' + s.name + ':', stderr || err.message)
       const queue = readQueue(s)
@@ -1892,26 +1811,16 @@ function steamcmdDownload(s, workshopIds, source, collectionId) {
 // helpers turn SteamCMD's own output plus the state on disk into something actionable.
 function stripAnsi(str) { return String(str).replace(/\x1b\[[0-9;]*m/g, '') }
 
-function humanBytes(n) {
-  if (!n || n < 0) return '0 B'
-  const u = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
-  return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i]
-}
 
-function freeBytes(s) {
-  try { const st = fs.statfsSync(s.data); return st.bavail * st.bsize } catch { return 0 }
-}
 
 // How much of an item SteamCMD has already pulled into the server's force_install_dir. That tree
 // is not mounted into this container, so ask the server container. A surviving partial is the
 // difference between "retry resumes" and "retry starts from zero".
 function partialBytes(s, workshopId) {
   try {
-    const out = execSync('docker exec ' + s.container + ' du -sb ' +
-      '/home/steam/pz-dedicated/steamapps/workshop/content/108600/' + workshopId +
-      ' 2>/dev/null || true', { timeout: 20000 }).toString().trim()
+    const out = docker.execInSync(s.container, ['sh', '-c',
+      'du -sb /home/steam/pz-dedicated/steamapps/workshop/content/108600/"$1" 2>/dev/null || true',
+      'sh', workshopId], { timeout: 20000 }).trim()
     return parseInt(out.split(/\s+/)[0], 10) || 0
   } catch { return 0 }
 }
@@ -1926,7 +1835,7 @@ function explainDownloadFailure(s, workshopId, logLines) {
     if (m) steamErr = m[0].trim()
   }
   const partial = partialBytes(s, workshopId)
-  const free = freeBytes(s)
+  const free = disk.freeBytes(s.data)
   const bits = []
 
   bits.push(steamErr ? 'SteamCMD: "' + steamErr + '".' : 'SteamCMD produced no mod folders for this item.')
@@ -1956,7 +1865,7 @@ function reconcileDownloads(s) {
   const queue = readQueue(s)
   const pending = queue.filter(e => e.status === 'queued')
   if (!pending.length) return
-  exec('docker logs ' + s.container + ' --tail 1500 2>&1', { maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+  docker.logs(s.container, ['--tail', '1500'], { maxBuffer: 8 * docker.MB }, (err, out) => {
     const activeIds = new Set(parseDownloads((out || '').split('\n')).map(a => a.workshopId))
     const settled = []
     for (const entry of pending) {
@@ -2353,11 +2262,16 @@ function reinstallHoldsContainer(s) {
   const r = REINSTALL[s.id]
   return !!(r && !r.finishedAt && r.holdsContainer)
 }
-function reinstallDir(s) { return s.data + '/backups/mod-reinstall' }
 
-const sh = (cmd, timeout) => new Promise((resolve, reject) =>
-  exec(cmd, { timeout: timeout || 120000, maxBuffer: 8 * 1024 * 1024 },
-    (err, stdout, stderr) => err ? reject(new Error(String(stderr || err.message).trim().slice(0, 400))) : resolve(stdout)))
+// Promise wrappers, so the eleven-step reinstall below reads as a sequence rather than a callback
+// ladder. Errors are trimmed because they end up in `state.error`, which the UI renders verbatim.
+const dockerControl = (action, s, timeout) => new Promise((resolve, reject) =>
+  docker.control(action, s.container, timeout, err => err ? reject(trimErr(err)) : resolve(undefined)))
+const dockerExecIn = (s, argv, timeout) => new Promise((resolve, reject) => {
+  try { resolve(docker.execInSync(s.container, argv, { timeout })) }
+  catch (e) { reject(trimErr(e)) }
+})
+const trimErr = e => new Error(String((e && e.stderr) || (e && e.message) || e).trim().slice(0, 400))
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const saveThenAsync = s => new Promise(resolve => saveThen(s, resolve))
 
@@ -2523,8 +2437,8 @@ async function reinstallWorkshopItem(s, workshopId) {
     // 2 — clear SteamCMD's copy so the download cannot no-op on an up-to-date manifest. This is
     // the staging tree, and the container is still up, so exec works.
     step('clearing SteamCMD copy')
-    await sh('docker exec ' + s.container + ' rm -rf ' +
-      '/home/steam/pz-dedicated/steamapps/workshop/content/108600/' + workshopId, 120000)
+    await dockerExecIn(s, ['rm', '-rf',
+      '/home/steam/pz-dedicated/steamapps/workshop/content/108600/' + workshopId], 120000)
 
     // 3 — download with the server still up. Any failure between here and step 4 costs nothing:
     // only the staging tree has been touched and the server never went down.
@@ -2550,8 +2464,8 @@ async function reinstallWorkshopItem(s, workshopId) {
 
     // The quarantine is on a different filesystem from the workshop tree, so it is a copy, not a
     // relink. Checked here because running out of room mid-swap would strand the server down.
-    const needBytes = dirSizeBytes(path.join(workshopContent(s), workshopId)) + dirSizeBytes(path.join(install, workshopId))
-    const haveBytes = freeBytes(s)
+    const needBytes = disk.dirSizeSync(path.join(workshopContent(s), workshopId)) + disk.dirSizeSync(path.join(install, workshopId))
+    const haveBytes = disk.freeBytes(s.data)
     if (haveBytes && needBytes > haveBytes * 0.9) {
       throw new Error('Not enough free space to quarantine ' + workshopId + ': needs about ' +
         humanBytes(needBytes) + ', ' + humanBytes(haveBytes) + ' free — nothing has been changed')
@@ -2563,7 +2477,7 @@ async function reinstallWorkshopItem(s, workshopId) {
     state.holdsContainer = true
     mstate(s).intentionalStop = true
     await saveThenAsync(s)
-    await sh('docker stop ' + s.container, 120000)
+    await dockerControl('stop', s, 120000)
     stopped = true
 
     // 6 — quarantine the old copies. The install tree is deliberately not moved: SteamCMD already
@@ -2602,7 +2516,7 @@ async function reinstallWorkshopItem(s, workshopId) {
     // 11 — back up.
     step('starting server')
     markAwaitingReady(s)
-    await sh('docker start ' + s.container, 60000)
+    await dockerControl('start', s, 60000)
     pruneQuarantine(s)
 
     state.ok = true
@@ -2630,7 +2544,7 @@ async function reinstallWorkshopItem(s, workshopId) {
       state.rolledBack = true
       logFor(s, 'reinstall ' + workshopId + ': rolled back, starting server again')
       markAwaitingReady(s)
-      try { await sh('docker start ' + s.container, 60000) } catch (e2) { console.error('[reinstall] start after rollback failed:', e2.message) }
+      try { await dockerControl('start', s, 60000) } catch (e2) { console.error('[reinstall] start after rollback failed:', e2.message) }
       pushoverFor(s, 'PZ Mod Reinstall Failed', 'Workshop item ' + workshopId + ' failed at "' + failedAt + '" and was rolled back. The server is starting again.')
       return state
     }
@@ -2772,7 +2686,6 @@ app.delete('/api/mods/:workshopId', (req, res) => {
 // sit behind their dependencies. Reordering rewrites the whole line, so every save snapshots the
 // previous order first — a bad drag is then one click to undo rather than a hand-rebuilt list of
 // 180 mod ids.
-function modOrderBackupDir(s) { return s.data + '/backups/mod-order' }
 const MOD_ORDER_BACKUP_KEEP = 20
 
 function listModOrderBackups(s) {
@@ -2867,10 +2780,6 @@ app.post('/api/mods/order/restore', (req, res) => {
 // half-removed: a Workshop item unregistered but its files left behind, or a folder copied into
 // the server's mods dir whose Workshop item is long gone. Those cost disk and confuse later
 // installs, and nothing else in here would ever surface them.
-function dirSizeBytes(p) {
-  try { return parseInt(execSync('du -sb ' + JSON.stringify(p) + ' 2>/dev/null || true', { timeout: 20000 }).toString().split(/\s+/)[0], 10) || 0 }
-  catch { return 0 }
-}
 
 function auditServer(s) {
   const registered = getIniList(s, 'WorkshopItems')
@@ -2887,7 +2796,7 @@ function auditServer(s) {
   const unregistered = onDisk.filter(id => !registeredSet.has(id)).map(id => ({
     workshopId: id,
     folders: (() => { try { return fs.readdirSync(path.join(workshopContent(s), id, 'mods')) } catch { return [] } })(),
-    bytes: dirSizeBytes(path.join(workshopContent(s), id))
+    bytes: disk.dirSizeSync(path.join(workshopContent(s), id))
   }))
 
   // Registered but no mod content on disk — the server will fail to load these.
@@ -2899,7 +2808,7 @@ function auditServer(s) {
   let modsDirFolders = []
   try { modsDirFolders = fs.readdirSync(modsDir(s), { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name) } catch {}
   const orphanFolders = modsDirFolders.filter(f => !expectedFolders.has(f)).map(f => ({
-    folder: f, bytes: dirSizeBytes(path.join(modsDir(s), f))
+    folder: f, bytes: disk.dirSizeSync(path.join(modsDir(s), f))
   }))
 
   // Enabled in Mods= but no installed mod.info provides that id — silently does nothing.
@@ -2930,8 +2839,8 @@ function auditServer(s) {
     unregistered, missingContent, orphanFolders, phantomEnabled, installedNotEnabled, duplicateIds, notLoadable,
     reclaimableBytes: reclaimable,
     reclaimableHuman: humanBytes(reclaimable),
-    freeBytes: freeBytes(s),
-    freeHuman: humanBytes(freeBytes(s))
+    freeBytes: disk.freeBytes(s.data),
+    freeHuman: humanBytes(disk.freeBytes(s.data))
   }
 }
 
@@ -2957,7 +2866,7 @@ app.delete('/api/audit/orphan', (req, res) => {
   } else {
     return res.status(400).json({ error: 'kind must be "workshop" or "folder"' })
   }
-  const bytes = dirSizeBytes(target)
+  const bytes = disk.dirSizeSync(target)
   try { fs.rmSync(target, { recursive: true, force: true }) }
   catch (e) { return res.status(500).json({ error: 'Delete failed: ' + e.message }) }
   logFor(s, 'deleted orphaned ' + kind + ' "' + id + '" - freed ' + humanBytes(bytes))
@@ -2997,7 +2906,6 @@ app.delete('/api/audit/orphans', (req, res) => {
 // Not every declared requirement is genuinely required — authors list optional companion mods in
 // require= all the time — so nothing is auto-installed or auto-enabled. Issues are reported and
 // the user decides, with an ignore list for the ones that don't apply.
-function depIgnorePath(s) { return s.data + '/dependency-ignores.json' }
 function readDepIgnores(s) {
   try { const v = JSON.parse(fs.readFileSync(depIgnorePath(s), 'utf8')); return Array.isArray(v) ? v : [] }
   catch { return [] }
@@ -3134,7 +3042,6 @@ app.post('/api/dependencies/fix-order', (req, res) => {
 const AUTOUPDATE_CHECK_MS = 60 * 60 * 1000   // ask Steam at most hourly
 const AUTOUPDATE_TICK_MS = 5 * 60 * 1000     // but re-evaluate the restart condition often
 
-function autoUpdatePath(s) { return s.data + '/mod-autoupdate.json' }
 function readAutoUpdate(s) {
   const def = { enabled: false, restartWhenEmpty: true, lastCheck: null, lastRestart: null, pending: [], times: {}, lastResult: '' }
   try { return Object.assign(def, JSON.parse(fs.readFileSync(autoUpdatePath(s), 'utf8'))) }
@@ -3161,7 +3068,7 @@ function fetchWorkshopTimes(ids, cb) {
 
 // How many downloads are still in flight for this server.
 function activeDownloadCount(s, cb) {
-  exec('docker logs ' + s.container + ' --tail 1500 2>&1', { maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+  docker.logs(s.container, ['--tail', '1500'], { maxBuffer: 8 * docker.MB }, (err, out) => {
     const live = parseDownloads((out || '').split('\n')).length
     const queued = readQueue(s).filter(e => e.status === 'queued').length
     cb(live + queued)
@@ -3356,13 +3263,13 @@ function collectLogAlerts(s, cb) {
   const done = { at: Date.now(), server: [], manager: [] }
   let pending = 2
   const finish = () => { if (--pending <= 0) { alertLogCache[s.id] = done; cb(done) } }
-  exec('docker logs ' + s.container + ' --since 60m --tail 4000 2>&1', { maxBuffer: 16 * 1024 * 1024 }, (e, out) => {
+  docker.logs(s.container, ['--since', '60m', '--tail', '4000'], { maxBuffer: 16 * docker.MB }, (e, out) => {
     done.server = summariseLogErrors(out, /^ERROR|SEVERE|FATAL/)
     finish()
   })
   const own = ownContainerId()
   if (!own) return finish()
-  exec('docker logs ' + own + ' --since 60m --tail 2000 2>&1', { maxBuffer: 8 * 1024 * 1024 }, (e, out) => {
+  docker.logs(own, ['--since', '60m', '--tail', '2000'], { maxBuffer: 8 * docker.MB }, (e, out) => {
     done.manager = summariseLogErrors(out, /error|failed|exception/i)
     finish()
   })
@@ -3593,7 +3500,6 @@ app.delete('/api/collections/:id', (req, res) => {
 
 // --- Scheduled collection auto-sync ---
 // Config lives alongside the registry so it survives restarts. Off by default.
-function autoSyncPath(s) { return s.data + '/collection-autosync.json' }
 function readAutoSync(s) {
   try { return Object.assign({ enabled: false, intervalHours: 24 }, JSON.parse(fs.readFileSync(autoSyncPath(s), 'utf8'))) }
   catch { return { enabled: false, intervalHours: 24, lastRun: null } }
@@ -3646,25 +3552,6 @@ setInterval(() => {
 
 // ===== SERVER CONFIG =====
 
-// Curated fields shown as dedicated controls in the UI; everything else the ini actually
-// contains still round-trips through the "Advanced Options" section below (see getFullIni).
-const CONFIG_FIELDS = [
-  'PublicName','Password','MaxPlayers','PVP','SafetySystem','Open','Public',
-  'PauseEmpty','GlobalChat','VoiceEnable','HoursForLootRespawn','SaveWorldEveryMinutes'
-]
-
-// Every key=value pair actually present in servertest.ini — lets the UI expose the full
-// option set without this file needing to enumerate every possible PZ ini key up front.
-function getFullIni(s) {
-  const cfg = {}
-  for (const line of readIni(s).split('\n')) {
-    const m = line.match(/^(\w+)=(.*)$/)
-    if (m) cfg[m[1]] = m[2]
-  }
-  return cfg
-}
-
-const INI_KEY_RE = /^\w+$/
 
 app.get('/api/config', (req, res) => {
   const s = srv(req)
@@ -3689,7 +3576,6 @@ app.put('/api/config', (req, res) => {
 // into typed field descriptors for a real form UI, and writes changes back by surgically
 // replacing only the value on each changed line. That keeps every comment, blank line and
 // indentation byte-identical, so a save can never reformat or damage the file.
-function sandboxPath(s) { return s.data + '/Server/servertest_SandboxVars.lua' }
 
 const SANDBOX_KEY_RE = /^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?),?\s*$/
 const SANDBOX_OPEN_RE = /^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{\s*$/
@@ -3984,15 +3870,12 @@ app.get('/api/config/sandbox/backups', (req, res) => {
 
 app.get('/api/sysinfo', (req, res) => {
   const s = srv(req)
-  exec('docker stats ' + s.container + ' --no-stream --format "{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}"', (err, out) => {
+  docker.stats(s.container, (err, out) => {
     const parts = (out || '').trim().split('|')
     const cpu = parts[0] || '—'
     const mem = parts[1] || '—'
     const memPct = parts[2] || '—'
-    exec('df -hP /workshop 2>/dev/null | tail -1', (err2, diskOut) => {
-      const cols = (diskOut || '').trim().split(/\s+/)
-      res.json({ cpu, mem, memPct, disk: { size: cols[1] || '—', used: cols[2] || '—', avail: cols[3] || '—', pct: cols[4] || '—' } })
-    })
+    disk.df('/workshop', cols => res.json({ cpu, mem, memPct, disk: cols }))
   })
 })
 
@@ -4014,8 +3897,8 @@ app.get('/api/servertime', (req, res) => {
 // and is what the "Queued for Download" UI section actually renders from.
 app.get('/api/downloads', (req, res) => {
   const s = srv(req)
-  exec('docker logs ' + s.container + ' --tail 2000', { maxBuffer: 8 * 1024 * 1024 }, (err, out, stderr) => {
-    const lines = ((out || '') + '\n' + (stderr || '')).split('\n')
+  docker.logs(s.container, ['--tail', '2000'], { maxBuffer: 8 * docker.MB }, (err, out) => {
+    const lines = (out || '').split('\n')
     res.json({ active: parseDownloads(lines), queue: readQueue(s).slice().reverse() })
   })
 })
