@@ -6,20 +6,34 @@ const https = require('https')
 const querystring = require('querystring')
 const crypto = require('crypto')
 const net = require('net')
-const { droppedItems } = require('./prune')
-const { parseDepList, analyzeDependencies, sortIssues } = require('./deps')
-const { validateReorder, moveItem } = require('./order')
-const { outdatedItems, seedState, dueForCheck, shouldRestart, shouldDownload } = require('./autoupdate')
-const { readyCheck } = require('./ready')
-const { reconcileMods } = require('./modload')
-const { analyzeModDrift, planRepair, versionRank } = require('./moddrift')
-const { allExcludes, addExclude, removeExclude, isExcluded, removalTargets, validFolder, validWorkshopId } = require('./excludes')
-const { saveThenGoDown } = require('./save')
-const { makeState: makePlayerState, applyLine: applyPlayerLine, replay: replayPlayerLog, onlineNames: playerNames, parseConnectedCount } = require('./players')
+const { droppedItems } = require('./lib/prune')
+const { parseDepList, analyzeDependencies, sortIssues } = require('./lib/deps')
+const { validateReorder, moveItem } = require('./lib/order')
+const { outdatedItems, seedState, dueForCheck, shouldRestart, shouldDownload } = require('./lib/autoupdate')
+const { readyCheck } = require('./lib/ready')
+const { reconcileMods } = require('./lib/modload')
+const { analyzeModDrift, planRepair, versionRank } = require('./lib/moddrift')
+const { allExcludes, addExclude, removeExclude, isExcluded, removalTargets, validFolder, validWorkshopId } = require('./lib/excludes')
+const { saveThenGoDown } = require('./lib/save')
+const { makeState: makePlayerState, applyLine: applyPlayerLine, replay: replayPlayerLog, onlineNames: playerNames, parseConnectedCount } = require('./lib/players')
+const auth = require('./src/auth')
+const archive = require('./src/services/archive')
+const { qs, header, installErrorHandler, installProcessGuards } = require('./src/http')
+
+installProcessGuards()
 
 const app = express()
 app.use(express.json())
-app.use(express.static('public'))
+
+// The built SPA, served before authentication so the login form can load at all. It carries no
+// secrets — every byte of state it renders comes from an /api call that is authenticated.
+// WEB_DIST exists so `npm run dev` can point this at Vite's output while iterating.
+const WEB_DIST = process.env.WEB_DIST || 'dist'
+app.use(express.static(WEB_DIST))
+
+// Must be installed before any route below it: Express runs middleware in registration order, so
+// anything registered above this line would be reachable without a token.
+const MANAGER_AUTH = auth.install(app)
 
 // ===== SERVER REGISTRY =====
 // A managed PZ server is a Docker container plus the data/workshop paths this manager has
@@ -435,10 +449,16 @@ function isB42Db(s) {
 }
 
 // --- Notification helpers ---
+// Credentials come from the environment, never from this file. The two that used to sit here were
+// a live Pushover app token and user key, committed and pushed — so they are also in git history
+// and must be rotated at Pushover, not merely moved.
+//
+// `enabled` now follows the credentials: shipping enabled:true with a default token meant any
+// fresh deploy immediately pushed to whoever owned it.
 const DEFAULT_NOTIF = {
-  enabled: true,
-  token: 'adw4ispss264iinsd755kh6jwrd1bz',
-  userKey: 'umjbifuguvki59qzz1kf9a633g7pt5',
+  enabled: !!(process.env.PUSHOVER_TOKEN && process.env.PUSHOVER_USER_KEY),
+  token: process.env.PUSHOVER_TOKEN || '',
+  userKey: process.env.PUSHOVER_USER_KEY || '',
   events: {
     serverStart: true,
     serverStop: true,
@@ -463,11 +483,32 @@ const DEFAULT_NOTIF = {
 function readNotifConfig() {
   try {
     const saved = JSON.parse(fs.readFileSync(NOTIF_PATH, 'utf8'))
-    return Object.assign({}, DEFAULT_NOTIF, saved, {
+    const merged = Object.assign({}, DEFAULT_NOTIF, saved, {
       events: Object.assign({}, DEFAULT_NOTIF.events, saved.events || {}),
       discord: Object.assign({}, DEFAULT_NOTIF.discord, saved.discord || {})
     })
+    // A saved blank must not shadow a credential supplied by the environment: a config file
+    // written before PUSHOVER_TOKEN was set carries token:'' and would otherwise silently disable
+    // notifications that are correctly configured in docker-compose.
+    if (!merged.token) merged.token = DEFAULT_NOTIF.token
+    if (!merged.userKey) merged.userKey = DEFAULT_NOTIF.userKey
+    return merged
   } catch { return Object.assign({}, DEFAULT_NOTIF) }
+}
+
+// The config minus the secrets. The UI needs to know whether credentials are set, never what they
+// are — and this response used to carry a live Pushover token and user key to any caller.
+function publicNotifConfig() {
+  const cfg = readNotifConfig()
+  const { token, userKey, ...rest } = cfg
+  return Object.assign(rest, {
+    tokenSet: !!token,
+    userKeySet: !!userKey,
+    discord: Object.assign({}, cfg.discord, {
+      webhookUrl: undefined,
+      webhookUrlSet: !!(cfg.discord && cfg.discord.webhookUrl)
+    })
+  })
 }
 function writeNotifConfig(cfg) {
   fs.writeFileSync(NOTIF_PATH, JSON.stringify(cfg, null, 2))
@@ -605,6 +646,9 @@ function updateDiscordStatus(cb) {
       }
 
       function sendCard(versions) {
+        // Discord accepts either `content` (plain) or `embeds` (rich card), and `avatar_url` is
+        // added to whichever shape was built.
+        /** @type {{ content?: string, embeds?: object[], avatar_url?: string }} */
         let body
         if (cfg.discord.richCard) {
           // One embed per server, its description a list of "**Key** : value" lines. Embed fields
@@ -937,7 +981,7 @@ function findLatestUserLog(s) {
     return fs.readdirSync(logDir(s))
       .filter(f => f.endsWith('_user.txt'))
       .map(f => path.join(logDir(s), f))
-      .sort((a, b) => fs.statSync(b).mtime - fs.statSync(a).mtime)[0] || null
+      .sort((a, b) => fs.statSync(b).mtime.getTime() - fs.statSync(a).mtime.getTime())[0] || null
   } catch { return null }
 }
 
@@ -1209,7 +1253,7 @@ function listBackupDir(dir) {
         const stat = fs.statSync(path.join(dir, f))
         return { name: f, size: stat.size, mtime: stat.mtime.toISOString() }
       })
-      .sort((a, b) => new Date(b.mtime) - new Date(a.mtime))
+      .sort((a, b) => Date.parse(b.mtime) - Date.parse(a.mtime))
   } catch { return [] }
 }
 
@@ -1767,7 +1811,7 @@ function registerInstalledMod(s, workshopId, opts) {
     // just wrote, including folders the author has removed since the last download.
     try {
       fs.rmSync(itemDest, { recursive: true, force: true })
-      execSync('cp -r "' + fromInstall + '" "' + itemDest + '"', { timeout: 300000 })
+      fs.cpSync(fromInstall, itemDest, { recursive: true })
     } catch (e) { console.error('[install] force mirror failed for ' + workshopId + ':', e.message) }
   } else {
     try {
@@ -1795,8 +1839,12 @@ function registerInstalledMod(s, workshopId, opts) {
         if (force && fs.existsSync(dest) && !folderProviders(s, folder).some(id => id !== workshopId)) {
           fs.rmSync(dest, { recursive: true, force: true })
         }
-        if (!fs.existsSync(dest)) { execSync('cp -r "' + src + '" "' + dest + '"'); copiedFolders.push(folder) }
-      } catch {}
+        if (!fs.existsSync(dest)) { fs.cpSync(src, dest, { recursive: true }); copiedFolders.push(folder) }
+      } catch (e) {
+        // Was swallowed silently, which is the worst possible outcome here: the item then looks
+        // installed, gets written into Mods=, and the mod it names has no files to load from.
+        console.error('[install] could not copy mod folder "' + folder + '" for item ' + workshopId + ': ' + e.message)
+      }
     }
   }
   // Clears the item's excluded folders out of the install/workshop trees too — the copy loop above
@@ -2405,6 +2453,17 @@ function quarantinedFolders(quarantine) {
 }
 
 async function reinstallWorkshopItem(s, workshopId) {
+  /**
+   * Progress for the one reinstall this server may have in flight. Every field is declared here,
+   * including the ones only some outcomes set, because this object is what GET /api/mods/reinstall
+   * serves and the UI branches on which of them are present.
+   *
+   * @type {{
+   *   workshopId: string, step: string, startedAt: string, finishedAt: string|null,
+   *   ok: boolean, error: string|null, quarantine: string|null,
+   *   holdsContainer?: boolean, addedModIds?: string[], rolledBack?: boolean, strandedDown?: boolean
+   * }}
+   */
   const state = REINSTALL[s.id] = {
     workshopId, step: 'starting', startedAt: new Date().toISOString(),
     finishedAt: null, ok: false, error: null, quarantine: null,
@@ -2676,7 +2735,8 @@ function removeWorkshopItem(s, workshopId) {
   const removedFolders = modNamesFromWorkshop(s, workshopId)
   for (const folder of removedFolders) {
     const dest = path.join(modsDir(s), folder)
-    if (fs.existsSync(dest)) try { execSync('rm -rf "' + dest + '"') } catch {}
+    try { fs.rmSync(dest, { recursive: true, force: true }) }
+    catch (e) { console.error('[remove] could not delete mod folder "' + folder + '": ' + e.message) }
   }
   setIniList(s, 'WorkshopItems', getIniList(s, 'WorkshopItems').filter(id => id !== workshopId))
   setIniList(s, 'Mods', getIniList(s, 'Mods').filter(id => !removedIds.includes(id)))
@@ -2898,7 +2958,7 @@ app.delete('/api/audit/orphan', (req, res) => {
     return res.status(400).json({ error: 'kind must be "workshop" or "folder"' })
   }
   const bytes = dirSizeBytes(target)
-  try { execSync('rm -rf ' + JSON.stringify(target)) }
+  try { fs.rmSync(target, { recursive: true, force: true }) }
   catch (e) { return res.status(500).json({ error: 'Delete failed: ' + e.message }) }
   logFor(s, 'deleted orphaned ' + kind + ' "' + id + '" - freed ' + humanBytes(bytes))
   res.json({ success: true, kind, id, freed: humanBytes(bytes) })
@@ -2921,7 +2981,7 @@ app.delete('/api/audit/orphans', (req, res) => {
   const failed = []
   let freed = 0
   for (const t of targets) {
-    try { execSync('rm -rf ' + JSON.stringify(t.path)); deleted.push({ kind: t.kind, id: t.id }); freed += t.bytes }
+    try { fs.rmSync(t.path, { recursive: true, force: true }); deleted.push({ kind: t.kind, id: t.id }); freed += t.bytes }
     catch (e) { failed.push({ kind: t.kind, id: t.id, error: e.message }) }
   }
   logFor(s, 'bulk orphan delete: removed ' + deleted.length + ' item(s), freed ' + humanBytes(freed) + (failed.length ? ', ' + failed.length + ' failed' : ''))
@@ -3915,7 +3975,7 @@ app.get('/api/config/sandbox/backups', (req, res) => {
     const files = fs.readdirSync(dir)
       .filter(f => f.startsWith(base + '.') && f.endsWith('.bak'))
       .map(f => ({ name: f, mtime: fs.statSync(path.join(dir, f)).mtime.toISOString() }))
-      .sort((a, b) => new Date(b.mtime) - new Date(a.mtime))
+      .sort((a, b) => Date.parse(b.mtime) - Date.parse(a.mtime))
     res.json({ backups: files })
   } catch (e) { res.json({ backups: [] }) }
 })
@@ -3974,15 +4034,50 @@ app.delete('/api/downloads/queue', (req, res) => {
 // ===== NOTIFICATIONS =====
 
 app.get('/api/notifications', (req, res) => {
-  res.json(readNotifConfig())
+  res.json(publicNotifConfig())
 })
 
+// Merged over what is already saved, not swapped for it: the previous version wrote req.body
+// straight to disk, so a partial payload from any client silently erased the Discord settings and
+// every event toggle it did not happen to mention.
+//
+// A blank secret means "leave it alone", which is what lets the UI render a
+// "configured — leave blank to keep" field instead of round-tripping the token through the browser.
 app.put('/api/notifications', (req, res) => {
-  const cfg = req.body
-  if (typeof cfg.enabled !== 'boolean') return res.status(400).json({ error: 'Invalid config' })
+  const body = req.body || {}
+  if (typeof body.enabled !== 'boolean') return res.status(400).json({ error: 'Invalid config' })
+
+  const cur = readNotifConfig()
+  const cfg = Object.assign({}, cur, {
+    enabled: body.enabled,
+    token: typeof body.token === 'string' && body.token ? body.token : cur.token,
+    userKey: typeof body.userKey === 'string' && body.userKey ? body.userKey : cur.userKey,
+    lowDiskThresholdGB: Number.isFinite(body.lowDiskThresholdGB) ? body.lowDiskThresholdGB : cur.lowDiskThresholdGB,
+    // Only keys this manager actually knows about, and only booleans. Stops an arbitrary blob
+    // reaching the file, and stops a typo'd event name accumulating there forever.
+    events: Object.fromEntries(Object.keys(DEFAULT_NOTIF.events).map(k => [
+      k, typeof (body.events || {})[k] === 'boolean' ? body.events[k] : cur.events[k]
+    ])),
+    discord: Object.assign({}, cur.discord, sanitizeDiscord(body.discord, cur.discord))
+  })
   writeNotifConfig(cfg)
   res.json({ success: true })
 })
+
+// Same rules as above, one level down.
+function sanitizeDiscord(incoming, cur) {
+  const d = incoming || {}
+  const out = {}
+  if (typeof d.enabled === 'boolean') out.enabled = d.enabled
+  if (typeof d.richCard === 'boolean') out.richCard = d.richCard
+  if (typeof d.template === 'string') out.template = d.template
+  if (typeof d.iconUrl === 'string') out.iconUrl = d.iconUrl
+  if (typeof d.messageId === 'string') out.messageId = d.messageId
+  // Blank keeps the saved webhook, for the same reason a blank token does.
+  if (typeof d.webhookUrl === 'string' && d.webhookUrl) out.webhookUrl = d.webhookUrl
+  else out.webhookUrl = cur.webhookUrl
+  return out
+}
 
 app.post('/api/notifications/test', (req, res) => {
   const cfg = readNotifConfig()
@@ -4078,21 +4173,19 @@ app.get('/api/backups/create', (req, res) => {
 
 // Download an existing server backup zip/tar.gz
 app.get('/api/backups/download', (req, res) => {
-  const p = validBackupPath(srv(req), req.query.type, req.query.name)
+  const p = validBackupPath(srv(req), qs(req.query.type), qs(req.query.name))
   if (!p) return res.status(404).json({ error: 'Backup not found' })
   res.download(p)
 })
 
 // List contents of an existing backup (for inspection)
 app.get('/api/backups/peek', (req, res) => {
-  const p = validBackupPath(srv(req), req.query.type, req.query.name)
+  const p = validBackupPath(srv(req), qs(req.query.type), qs(req.query.name))
   if (!p) return res.status(404).json({ error: 'Backup not found' })
-  const name = req.query.name
-  const cmd = name.endsWith('.tar.gz')
-    ? 'tar -tzf "' + p + '" 2>&1 | head -50'
-    : 'unzip -l "' + p + '" 2>&1 | head -50'
-  exec(cmd, { timeout: 30000 }, (err, stdout) => {
-    res.json({ contents: stdout || '(empty)' })
+  archive.listMembers(p, (err, names) => {
+    if (err) return res.status(500).json({ error: err.message })
+    // The same 50-line preview as before, plus the count so a truncated list says so.
+    res.json({ contents: names.slice(0, 50).join('\n') || '(empty)', members: names.length })
   })
 })
 
@@ -4100,44 +4193,69 @@ app.get('/api/backups/peek', (req, res) => {
 app.post('/api/backups/restore', (req, res) => {
   const s = srv(req)
   const { type, name } = req.body || {}
-  const p = validBackupPath(s, type, name)
+  const p = validBackupPath(s, typeof type === 'string' ? type : '', typeof name === 'string' ? name : '')
   if (!p) return res.status(404).json({ error: 'Backup not found' })
 
-  const cmd = name.endsWith('.tar.gz')
-    ? 'tar -xzf "' + p + '" -C ' + s.data + '/'
-    : 'unzip -o "' + p + '" -d ' + s.data + '/'
-
-  exec(cmd, { timeout: 300000 }, (err, stdout, stderr) => {
-    if (err) return res.status(500).json({ error: err.message, detail: (stderr || '').slice(0, 500) })
-    res.json({ success: true })
+  archive.extractInto(p, s.data, (err, info) => {
+    if (err) return res.status(500).json({ error: err.message })
+    logFor(s, 'restored backup "' + name + '" (' + (info ? info.members : 0) + ' entries)')
+    res.json({ success: true, members: info ? info.members : 0 })
   })
 })
 
-// Upload a backup file and restore from it
-// Accepts raw application/octet-stream body; client sets X-Backup-Ext header to 'zip' or 'tar.gz'
+// Upload a backup file and restore from it.
+// Accepts a raw application/octet-stream body; the client sets X-Backup-Ext to 'zip' or 'tar.gz'.
+//
+// Capped: the volume this writes to is the one the game server is saving the world onto, so an
+// unbounded upload was a way to stop the server by filling its disk. The archive is also checked
+// member by member before anything is extracted — see src/services/archive.js.
 app.post('/api/backups/upload', (req, res) => {
   const s = srv(req)
-  const rawExt = (req.headers['x-backup-ext'] || 'zip').toLowerCase().replace(/[^a-z.]/g, '')
-  const ext = rawExt === 'tar.gz' ? 'tar.gz' : 'zip'
-  const tempPath = '/tmp/pz-restore-upload-' + s.id + '.' + (ext === 'tar.gz' ? 'tar_gz' : 'zip')
+  const ext = header(req, 'x-backup-ext').toLowerCase() === 'tar.gz' ? 'tar.gz' : 'zip'
+  const declared = Number(header(req, 'content-length') || 0)
+  if (declared && declared > archive.MAX_UPLOAD_BYTES) {
+    return res.status(413).json({ error: 'Backup is larger than the ' + humanBytes(archive.MAX_UPLOAD_BYTES) + ' upload limit' })
+  }
+
+  const tempPath = '/tmp/pz-restore-upload-' + s.id + '.' + (ext === 'tar.gz' ? 'tar.gz' : 'zip')
   const ws = fs.createWriteStream(tempPath)
+  const cleanup = () => fs.unlink(tempPath, () => {})
+
+  let received = 0
+  let aborted = false
+  const fail = (status, message) => {
+    if (aborted) return
+    aborted = true
+    req.unpipe(ws)
+    ws.destroy()
+    cleanup()
+    if (!res.headersSent) res.status(status).json({ error: message })
+  }
+
+  // Content-Length can lie, or be absent on a chunked upload, so the real limit is enforced on the
+  // bytes that actually arrive.
+  req.on('data', chunk => {
+    received += chunk.length
+    if (received > archive.MAX_UPLOAD_BYTES) {
+      fail(413, 'Backup exceeded the ' + humanBytes(archive.MAX_UPLOAD_BYTES) + ' upload limit')
+      req.destroy()
+    }
+  })
 
   req.pipe(ws)
 
   ws.on('finish', () => {
-    const cmd = ext === 'tar.gz'
-      ? 'tar -xzf "' + tempPath + '" -C ' + s.data + '/'
-      : 'unzip -o "' + tempPath + '" -d ' + s.data + '/'
-
-    exec(cmd, { timeout: 300000 }, (err, stdout, stderr) => {
-      fs.unlink(tempPath, () => {})
-      if (err) return res.status(500).json({ error: err.message, detail: (stderr || '').slice(0, 500) })
-      res.json({ success: true })
+    if (aborted) return
+    archive.extractInto(tempPath, s.data, (err, info) => {
+      cleanup()
+      if (err) return res.status(400).json({ error: err.message })
+      logFor(s, 'restored uploaded backup (' + humanBytes(received) + ', ' + (info ? info.members : 0) + ' entries)')
+      res.json({ success: true, members: info ? info.members : 0 })
     })
   })
 
-  ws.on('error', (e) => res.status(500).json({ error: e.message }))
-  req.on('error', (e) => { ws.destroy(); res.status(500).json({ error: e.message }) })
+  ws.on('error', e => fail(500, e.message))
+  req.on('error', e => fail(500, e.message))
 })
 
 
@@ -4153,11 +4271,24 @@ app.get('/api/players/online', (req, res) => {
 // rather than printing a bare port that doesn't match the URL people actually use.
 // Servers are listed as id + resolved label, because an id is just a slug the user can rename and
 // on its own it says nothing about which server it refers to.
+// Registered after every route, because Express only reaches an error handler for what was
+// registered before it.
+installErrorHandler(app)
+
 app.listen(7777, () => {
   console.log(
     'PZ Server Manager listening on container port 7777 (published to the host by docker-compose) — servers: ' +
     (allServers().map(s => s.id + ' "' + serverLabel(s) + '"').join(', ') || 'none found')
   )
+  // The operator needs the token to get in, and on a first run `docker logs` is the only place it
+  // exists. An operator-set MANAGER_TOKEN is never echoed — they already have it, and printing it
+  // would copy a secret they chose deliberately into the log stream the UI displays.
+  if (MANAGER_AUTH.source === 'env') {
+    logFor(null, 'auth: using MANAGER_TOKEN from the environment')
+  } else {
+    logFor(null, 'auth: manager token is ' + MANAGER_AUTH.token +
+      (MANAGER_AUTH.source === 'file' ? ' (from ' + '/pz-data/manager-token' + ')' : ' (generated — set MANAGER_TOKEN to pin it)'))
+  }
   // A startup summary, so the Manager Logs pane opens with the state it is working from rather
   // than a bare "listening" line and then silence until something happens.
   for (const s of allServers()) {

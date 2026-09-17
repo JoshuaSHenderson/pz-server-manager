@@ -1,8 +1,32 @@
 {
   "name": "pz-mod-manager",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "private": true,
   "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "vite",
+    "build": "tsc -b web && vite build",
+    "preview": "vite preview",
+    "test": "node --test lib/ src/",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "check": "npm run typecheck && npm test"
+  },
   "dependencies": {
-    "express": "^4.19.0"
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.17.10",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
   }
 }

@@ -3148,14 +3148,14 @@ function fetchPlayers() {
         return '<option value="' + v + '"' + (al === v ? ' selected' : '') + '>' + v + '</option>'
       }).join('')
       var bannedBtn = p.banned
-        ? '<button class="btn-success btn-sm" onclick="setPlayerBanned(\'' + p.username + '\', false)">Unban</button>'
-        : '<button class="btn-warn btn-sm" onclick="setPlayerBanned(\'' + p.username + '\', true)">Ban</button>'
+        ? '<button class="btn-success btn-sm" onclick="setPlayerBanned(' + jsArg(p.username) + ', false)">Unban</button>'
+        : '<button class="btn-warn btn-sm" onclick="setPlayerBanned(' + jsArg(p.username) + ', true)">Ban</button>'
       return '<tr>' +
         '<td class="mono">' + esc(p.username) + (p.displayName && p.displayName !== p.username ? '<br><span class="text-muted" style="font-size:.75rem">' + esc(p.displayName) + '</span>' : '') + '</td>' +
-        '<td><select class="access-sel" onchange="setAccessLevel(\'' + p.username + '\', this.value)">' + opts + '</select></td>' +
+        '<td><select class="access-sel" onchange="setAccessLevel(' + jsArg(p.username) + ', this.value)">' + opts + '</select></td>' +
         '<td>' + (p.banned ? '<span class="badge badge-banned">banned</span>' : '<span class="badge badge-' + al + '">' + al + '</span>') + '</td>' +
         '<td class="text-muted" style="font-size:.78rem">' + lastSeen + '</td>' +
-        '<td><div class="actions">' + bannedBtn + '<button class="btn-danger btn-sm" onclick="removePlayer(\'' + p.username + '\')">Remove</button></div></td>' +
+        '<td><div class="actions">' + bannedBtn + '<button class="btn-danger btn-sm" onclick="removePlayer(' + jsArg(p.username) + ')">Remove</button></div></td>' +
         '</tr>'
     }).join('')
     document.getElementById('players-table').innerHTML =
@@ -3345,7 +3345,7 @@ function renderBackupSection(containerId, items, type) {
       '<td style="color:var(--muted);font-size:.78rem;white-space:nowrap">' + date + '</td>' +
       '<td><div class="actions">' +
         '<a href="/api/backups/download?type=' + type + '&name=' + encodeURIComponent(b.name) + '" class="btn-secondary" style="padding:.3rem .65rem;font-size:.78rem;font-weight:600;border-radius:6px;display:inline-flex;align-items:center;text-decoration:none;border:1px solid var(--border)">Download</a>' +
-        '<button class="btn-warn btn-sm" onclick="restoreBackup(\'' + type + '\',\'' + esc(b.name) + '\')">Restore</button>' +
+        '<button class="btn-warn btn-sm" onclick="restoreBackup(' + jsArg(type) + ',' + jsArg(b.name) + ')">Restore</button>' +
       '</div></td>' +
       '</tr>'
   }).join('')
@@ -3449,8 +3449,19 @@ function uploadRestore() {
 }
 
 function esc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;')
 }
+
+// A value going into a JS string literal inside an inline handler needs more than esc().
+//
+// The HTML parser decodes entities *before* the JS in an on* attribute is compiled, so escaping an
+// apostrophe to &#39; does not keep it out of the string — onclick="f('it&#39;s')" compiles as
+// f('it's'). Values reaching these handlers are not all validated by this manager: a whitelist
+// username is written by the game when a player connects, and mod ids legitimately contain
+// apostrophes. So carry the value percent-encoded and decode it inside the handler, which is the
+// pattern the load-order and excludes panels already use.
+function jsArg(v) { return "decodeURIComponent('" + encodeURIComponent(String(v)) + "')" }
 
 function showMsg(id, text, type, timeout) {
   if (timeout === undefined) timeout = 5000
