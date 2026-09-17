@@ -4,12 +4,11 @@
 // src/services/lifecycle.js for why a plain `docker stop` loses up to SaveWorldEveryMinutes of play.
 
 const registry = require('../registry/servers')
-const { srv, serverLabel } = registry
+const { srv} = registry
 const { logFor } = require('../log')
 const { saveThen, bringUp, sendIngameMsg } = require('../services/lifecycle')
 const { mstate, markAwaitingReady } = require('../monitors/state')
 const { readNotifConfig, pushoverFor } = require('../services/notify')
-const reinstallState = require('../services/reinstall-state')
 const docker = require('../infra/docker')
 
 const router = require('express').Router()

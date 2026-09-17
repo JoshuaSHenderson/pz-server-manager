@@ -7,7 +7,6 @@
 //
 // Cached briefly because the PZ log runs to tens of thousands of lines and the dashboard polls.
 
-const registry = require('../registry/servers')
 const docker = require('../infra/docker')
 const { stripAnsi } = require('./downloads')
 

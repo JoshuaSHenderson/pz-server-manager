@@ -11,7 +11,6 @@ const fs = require('fs')
 const path = require('path')
 const registry = require('../registry/servers')
 const { srv } = registry
-const { logFor } = require('../log')
 const { sandboxPath } = require('../paths')
 const {
   parseSandbox, validateSandboxValue, formatSandboxValue, sandboxStructureOk, SANDBOX_KEY_RE,

@@ -8,11 +8,9 @@
 const fs = require('fs')
 const path = require('path')
 const { excludesPath, modsDir, workshopContent, installContent } = require('../paths')
-const { readJson, writeJson, safeReaddir } = require('../util/fsx')
-const { allExcludes, isExcluded, removalTargets, validFolder, validWorkshopId } = require('../../lib/excludes')
+const { allExcludes, removalTargets, validFolder, validWorkshopId } = require('../../lib/excludes')
 const { getIniList } = require('../domain/ini')
 const { logFor } = require('../log')
-const { modFolders } = require('../domain/modinfo')
 
 /** @typedef {import('../paths').Server} Server */
 

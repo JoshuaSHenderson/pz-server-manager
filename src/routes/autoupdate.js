@@ -2,10 +2,7 @@
 
 const registry = require('../registry/servers')
 const { srv } = registry
-const { logFor } = require('../log')
-const { getIniList } = require('../domain/ini')
 const { readAutoUpdate, writeAutoUpdate, runAutoUpdate, AUTOUPDATE_CHECK_MS } = require('../services/autoupdate')
-const { getTitles } = require('../infra/steam')
 
 const router = require('express').Router()
 

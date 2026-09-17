@@ -11,7 +11,6 @@
 const https = require('https')
 const registry = require('../registry/servers')
 const { getIniList, getIniValue } = require('../domain/ini')
-const { getTitles } = require('../infra/steam')
 const { readCollections } = require('./collections')
 const { readNotifConfig, writeNotifConfig } = require('./notify')
 const { getExternalIp } = require('../infra/net')

@@ -8,9 +8,8 @@ const { srv } = registry
 const { logFor } = require('../log')
 const { getIniList, setIniList } = require('../domain/ini')
 const {
-  installedModMeta, modIdsFromWorkshop, modNamesFromWorkshop, duplicateModIds,
+  modIdsFromWorkshop, modNamesFromWorkshop, 
 } = require('../domain/modinfo')
-const { missingProviders } = require('../domain/inventory')
 const {
   readQueue, writeQueue, hasModContent, steamcmdDownload,
 } = require('../services/downloads')

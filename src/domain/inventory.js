@@ -12,7 +12,7 @@
 
 const fs = require('fs')
 const path = require('path')
-const { modsDir, workshopContent, installContent } = require('../paths')
+const { modsDir, installContent } = require('../paths')
 const { getIniList } = require('./ini')
 const { serverBuildRank, folderIds, findModInfo, preferredModInfo } = require('./modinfo')
 const { safeReaddir } = require('../util/fsx')

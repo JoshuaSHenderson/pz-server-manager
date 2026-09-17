@@ -9,10 +9,9 @@ const { srv } = registry
 const { logFor } = require('../log')
 const { getIniList } = require('../domain/ini')
 const { duplicateModIds, modIdsByFolder } = require('../domain/modinfo')
-const { readExcludes, writeExcludes, folderProviders, applyExcludes } = require('../services/excludes')
-const { getTitles } = require('../infra/steam')
+const { readExcludes, writeExcludes, applyExcludes } = require('../services/excludes')
 const {
-  allExcludes, addExclude, removeExclude, removalTargets, validFolder, validWorkshopId,
+  addExclude, removeExclude, validFolder, validWorkshopId,
 } = require('../../lib/excludes')
 
 const router = require('express').Router()

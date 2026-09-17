@@ -12,7 +12,6 @@ const { modOrderBackupDir } = require('../paths')
 const { getIniList, setIniList } = require('../domain/ini')
 const { installedModMeta } = require('../domain/modinfo')
 const { listModOrderBackups, backupModOrder } = require('../services/modorder')
-const { getTitles } = require('../infra/steam')
 const { validateReorder } = require('../../lib/order')
 
 const router = require('express').Router()

@@ -4,8 +4,7 @@
 // selection rather than being locked out by one.
 
 const registry = require('../registry/servers')
-const { serverRow, serverLabel, refreshServers, readServerConfig, writeServerConfig } = registry
-const { logFor } = require('../log')
+const { serverRow, refreshServers, readServerConfig, writeServerConfig } = registry
 
 const allServers = registry.all
 const anyServerById = id => registry.anyById(id) || null

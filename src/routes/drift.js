@@ -4,12 +4,9 @@
 // work perfectly from the server's side, so nothing appears broken; the damage is only visible to a
 // player who gets "Mod ... is not installed [WorkshopID: ]" and bounces.
 
-const fs = require('fs')
-const path = require('path')
 const registry = require('../registry/servers')
 const { srv } = registry
 const { logFor } = require('../log')
-const { modsDir } = require('../paths')
 const { getIniList, setIniList } = require('../domain/ini')
 const { modDriftReport } = require('../domain/inventory')
 const { backupModOrder } = require('../services/modorder')

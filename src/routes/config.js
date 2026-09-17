@@ -3,7 +3,7 @@
 const registry = require('../registry/servers')
 const { srv } = registry
 const { logFor } = require('../log')
-const { getFullIni, setIniValue, CONFIG_FIELDS, INI_KEY_RE } = require('../domain/ini')
+const { getFullIni, setIniValue, INI_KEY_RE } = require('../domain/ini')
 
 const router = require('express').Router()
 

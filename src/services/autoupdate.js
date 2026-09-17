@@ -24,7 +24,6 @@ const { pushoverFor } = require('./notify')
 const { mstate, markAwaitingReady } = require('../monitors/state')
 const { outdatedItems, seedState, dueForCheck, shouldRestart, shouldDownload } = require('../../lib/autoupdate')
 const docker = require('../infra/docker')
-const { logFor } = require('../log')
 const registry = require('../registry/servers')
 const reinstallState = require('./reinstall-state')
 

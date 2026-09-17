@@ -15,7 +15,6 @@
 
 const registry = require('../registry/servers')
 const { mstate, markAwaitingReady, SERVER_READY_MARKER, READY_WAIT_MS } = require('./state')
-const { getIniList } = require('../domain/ini')
 const { readNotifConfig, pushover, pushoverFor } = require('../services/notify')
 const { reportDeadMods, reportModDrift } = require('../services/health')
 const { parseDownloads, reconcileDownloads } = require('../services/downloads')
@@ -30,7 +29,6 @@ const reinstallState = require('../services/reinstall-state')
 const { readyCheck } = require('../../lib/ready')
 const docker = require('../infra/docker')
 const disk = require('../infra/disk')
-const { logFor } = require('../log')
 
 const allServers = registry.all
 const serverLabel = registry.serverLabel

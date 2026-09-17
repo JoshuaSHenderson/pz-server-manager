@@ -20,7 +20,7 @@ const { getIniList, setIniList } = require('../domain/ini')
 const { itemHasContent, missingProviders } = require('../domain/inventory')
 const { modNamesFromWorkshop } = require('../domain/modinfo')
 const { registerInstalledMod, steamcmdDownload, readQueue, writeQueue } = require('./downloads')
-const { applyExcludes, folderProviders } = require('./excludes')
+const { folderProviders } = require('./excludes')
 const { saveThen } = require('./lifecycle')
 const { pushoverFor } = require('./notify')
 const reinstallState = require('./reinstall-state')
@@ -70,7 +70,7 @@ function quarantineMove(from, to) {
 
 function pruneQuarantine(s) {
   try {
-    const all = fs.readdirSync(reinstallDir(s)).sort().reverse()
+    const all = safeReaddir(reinstallDir(s)).sort().reverse()
     for (const old of all.slice(REINSTALL_QUARANTINE_KEEP)) {
       fs.rmSync(path.join(reinstallDir(s), old), { recursive: true, force: true })
     }
@@ -87,7 +87,7 @@ function pruneQuarantine(s) {
 function quarantinedFolders(quarantine) {
   const dir = path.join(quarantine, 'workshop', 'mods')
   if (!fs.existsSync(dir)) return []
-  try { return fs.readdirSync(dir).filter(f => !/^\d+\.\d+$/.test(f)) } catch { return [] }
+  return safeReaddir(dir).filter(f => !/^\d+\.\d+$/.test(f))
 }
 
 async function reinstallWorkshopItem(s, workshopId) {

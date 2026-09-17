@@ -8,7 +8,7 @@
 
 const fs = require('fs')
 const path = require('path')
-const { modsDir, workshopContent, installContent, logDir } = require('../paths')
+const { workshopContent, installContent, logDir } = require('../paths')
 const { safeReaddir } = require('../util/fsx')
 const { getIniList } = require('./ini')
 const { parseDepList } = require('../../lib/deps')

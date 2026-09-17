@@ -15,6 +15,7 @@
     "noImplicitThis": true,
     "alwaysStrict": true,
     "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true
   },

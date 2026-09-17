@@ -2,7 +2,6 @@
 
 const registry = require('../registry/servers')
 const { srv } = registry
-const { logFor } = require('../log')
 const { readSchedule, writeSchedule, INTERVAL_CHOICES } = require('../services/schedule')
 
 const router = require('express').Router()

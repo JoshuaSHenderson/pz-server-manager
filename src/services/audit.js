@@ -20,7 +20,6 @@ const { getIniList } = require('../domain/ini')
 const { installedModMeta, duplicateModIds, modNamesFromWorkshop } = require('../domain/modinfo')
 const { missingProviders } = require('../domain/inventory')
 const { hasModContent } = require('./downloads')
-const { safeReaddir, safeReaddirDirs } = require('../util/fsx')
 const disk = require('../infra/disk')
 
 const { humanBytes } = disk

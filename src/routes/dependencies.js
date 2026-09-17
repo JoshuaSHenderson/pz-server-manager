@@ -11,7 +11,6 @@ const { getIniList, setIniList } = require('../domain/ini')
 const { installedModMeta } = require('../domain/modinfo')
 const { readDepIgnores, writeDepIgnores, depKey } = require('../services/depignores')
 const { backupModOrder } = require('../services/modorder')
-const { getTitles } = require('../infra/steam')
 const { analyzeDependencies, sortIssues } = require('../../lib/deps')
 const { validateReorder, moveItem } = require('../../lib/order')
 

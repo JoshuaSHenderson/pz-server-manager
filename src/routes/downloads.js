@@ -5,7 +5,6 @@
 
 const registry = require('../registry/servers')
 const { srv } = registry
-const { logFor } = require('../log')
 const { readQueue, writeQueue, parseDownloads } = require('../services/downloads')
 const docker = require('../infra/docker')
 

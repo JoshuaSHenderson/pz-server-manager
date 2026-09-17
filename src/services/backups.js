@@ -17,16 +17,23 @@ const { safeReaddir } = require('../util/fsx')
 
 // ===== BACKUP HELPERS =====
 
+/**
+ * The archives in one backup directory, newest first.
+ * @param {string} dir
+ * @returns {{ name: string, size: number, mtime: string }[]}
+ */
 function listBackupDir(dir) {
-  try {
-    return fs.readdirSync(dir)
-      .filter(f => f.endsWith('.zip') || f.endsWith('.tar.gz'))
-      .map(f => {
+  return safeReaddir(dir)
+    .filter(f => f.endsWith('.zip') || f.endsWith('.tar.gz'))
+    .flatMap(f => {
+      // A file can vanish between the readdir and the stat — a rotation, or an upload being
+      // cleaned up. Dropping it is better than failing the whole listing.
+      try {
         const stat = fs.statSync(path.join(dir, f))
-        return { name: f, size: stat.size, mtime: stat.mtime.toISOString() }
-      })
-      .sort((a, b) => Date.parse(b.mtime) - Date.parse(a.mtime))
-  } catch { return [] }
+        return [{ name: f, size: stat.size, mtime: stat.mtime.toISOString() }]
+      } catch { return [] }
+    })
+    .sort((a, b) => Date.parse(b.mtime) - Date.parse(a.mtime))
 }
 
 function validBackupPath(s, type, name) {

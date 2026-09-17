@@ -71,12 +71,16 @@ function playerCountFor(s, cb) {
 }
 
 // Player event log monitor
+/**
+ * The most recently written user log, or null when the server has never had a connection.
+ * @param {Server} s
+ */
 function findLatestUserLog(s) {
+  const files = safeReaddir(logDir(s))
+    .filter(f => f.endsWith('_user.txt'))
+    .map(f => path.join(logDir(s), f))
   try {
-    return fs.readdirSync(logDir(s))
-      .filter(f => f.endsWith('_user.txt'))
-      .map(f => path.join(logDir(s), f))
-      .sort((a, b) => fs.statSync(b).mtime.getTime() - fs.statSync(a).mtime.getTime())[0] || null
+    return files.sort((a, b) => fs.statSync(b).mtime.getTime() - fs.statSync(a).mtime.getTime())[0] || null
   } catch { return null }
 }
 
