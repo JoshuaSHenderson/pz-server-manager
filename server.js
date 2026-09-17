@@ -36,6 +36,17 @@ const { updateDiscordStatus, discordRequest, parseWebhookUrl, collectionLinks } 
 const { getExternalIp } = require('./src/infra/net')
 const { getServerVersion } = require('./src/services/version')
 const { onlinePlayersFor, playerCountFor, pollUserLog } = require('./src/services/playerlog')
+const { saveThen, bringUp, sendIngameMsg } = require('./src/services/lifecycle')
+const { readSchedule, writeSchedule, minutesUntilRestart, INTERVAL_CHOICES } = require('./src/services/schedule')
+const {
+  installCollection, allDroppedItems, readAutoSync, writeAutoSync,
+} = require('./src/services/collection-sync')
+const {
+  readAutoUpdate, writeAutoUpdate, runAutoUpdate, AUTOUPDATE_CHECK_MS,
+} = require('./src/services/autoupdate')
+const monitors = require('./src/monitors')
+const { mstate, markAwaitingReady } = require('./src/monitors/state')
+const { reportModDrift, reportDeadMods } = require('./src/services/health')
 const {
   readNotifConfig, writeNotifConfig, publicNotifConfig, sanitizeDiscord, pushover, pushoverFor,
   DEFAULT_NOTIF,
@@ -86,189 +97,13 @@ app.use(express.static(WEB_DIST))
 // anything registered above this line would be reachable without a token.
 const MANAGER_AUTH = auth.install(app)
 
+// One scan before anything is served, so the first request does not race the first refresh.
 refreshServers()
-setInterval(refreshServers, 60000)
 
 app.use('/api', registry.guard)
 
 
 
-setInterval(updateDiscordStatus, 5 * 60 * 1000)
-
-// --- Background monitors (all per-server) ---
-const monitorState = {} // [serverId] = { lastKnownStatus, intentionalStop, wasDownloading, userLogPath, userLogPos }
-function mstate(s) {
-  if (!monitorState[s.id]) monitorState[s.id] = { lastKnownStatus: null, intentionalStop: false, wasDownloading: false, userLogPath: null, userLogPos: 0 }
-  return monitorState[s.id]
-}
-
-// "Started" only means the container is up. PZ then loads assets, mods and the world for a long
-// while — on this server, minutes — and rejects connections until it prints this. That is the
-// moment worth telling people about, not the container transition.
-const SERVER_READY_MARKER = '*** SERVER STARTED ***'
-const READY_WAIT_MS = 45 * 60 * 1000
-
-// Start waiting for the readiness marker of the run that is about to begin.
-//
-// The run must have started *after* this instant. Callers issue their `docker restart` on the very
-// next line, and a restart takes a few seconds to come back — so for those seconds `docker inspect`
-// still reports the *old* run's StartedAt, and `docker logs --since <that>` still contains the old
-// run's marker. Watching without this floor announced "ready" within seconds of every restart, and
-// measured the wait from the previous boot: on this server that read as 153m 8s.
-//
-// alreadyRunning=true is for the crash monitor, which notices a container that is already back up.
-// There the current run *is* the one to watch, so no floor applies.
-function markAwaitingReady(s, alreadyRunning) {
-  const st = mstate(s)
-  st.awaitingReady = true
-  st.awaitingSince = Date.now()
-  st.readyMinStart = alreadyRunning ? 0 : Date.now()
-}
-
-// Crash monitor
-setInterval(() => {
-  for (const s of allServers()) {
-    docker.inspect(s.container, '{{.State.Status}}', (err, out) => {
-      const status = (out || '').trim()
-      const st = mstate(s)
-      const cfg = readNotifConfig()
-      if (st.lastKnownStatus === 'running' && status !== 'running' && !st.intentionalStop && !reinstallState.busy(s)) {
-        if (cfg.enabled && cfg.events && cfg.events.serverCrash) {
-          pushoverFor(s, 'PZ Server Crashed', 'Server stopped unexpectedly. Container status: ' + status)
-        }
-      }
-      // Any transition into running — ours or a crash-restart — starts the wait for readiness.
-      // Skipped on the manager's first observation so restarting the manager alone can't fire it.
-      if (st.lastKnownStatus && st.lastKnownStatus !== 'running' && status === 'running') markAwaitingReady(s, true)
-      st.intentionalStop = false
-      st.lastKnownStatus = status
-    })
-  }
-}, 60000)
-
-// Watches for the readiness marker after a start/restart. Only looks at logs written since the
-// container came up, so the previous run's marker can never be mistaken for this one's.
-setInterval(() => {
-  for (const s of allServers()) {
-    const st = mstate(s)
-    if (!st.awaitingReady) continue
-    if (Date.now() - (st.awaitingSince || 0) > READY_WAIT_MS) {
-      st.awaitingReady = false
-      console.log('[ready] ' + serverLabel(s) + ': gave up waiting for the ready marker')
-      continue
-    }
-    docker.inspect(s.container, '{{.State.StartedAt}}', (e1, startedAt) => {
-      const since = (startedAt || '').trim()
-      if (!since) return
-      // -t so the marker carries the moment it was printed — see ready.js. The match and the
-      // "last one wins" are done on the text rather than by `| grep -F ... | tail -1`.
-      docker.logsContaining(s.container, ['-t', '--since', since], SERVER_READY_MARKER,
-        { maxBuffer: 4 * docker.MB }, (err, lines) => {
-          const verdict = readyCheck({ startedAt: since, readyMinStart: st.readyMinStart, markerLine: lines[lines.length - 1] })
-          if (!verdict.ready) return
-          if (!st.awaitingReady) return   // another tick won the race
-          st.awaitingReady = false
-          console.log('[ready] ' + serverLabel(s) + ': accepting players after ' + verdict.took)
-          const cfg = readNotifConfig()
-          if (cfg.enabled && cfg.events && cfg.events.serverReady !== false) {
-            pushoverFor(s, 'PZ Server Ready', 'Finished loading after ' + verdict.took + ' — accepting players now.')
-          }
-          reportDeadMods(s, since)
-          reportModDrift(s)
-        })
-    })
-  }
-}, 20000)
-
-// Enabled mods no client can download — see moddrift.js. Deliberately separate from
-// reportDeadMods(): these load perfectly well on the server, so the boot log shows nothing wrong,
-// and the first symptom is a player being told the mod "is not installed" with an empty
-// WorkshopID. Checked at boot so it surfaces before someone tries to join, not after.
-function reportModDrift(s) {
-  let report
-  try { report = modDriftReport(s) } catch (e) { return console.error('[drift]', e.message) }
-  if (report.stale.length) {
-    logFor(s, report.stale.length + ' local mod copy(ies) behind the Workshop: ' +
-      report.stale.map(t => t.folder + ' ' + (t.local || 'none') + '->' + t.workshop).join(', '))
-  }
-  if (!report.issues.length) {
-    console.log('[drift] ' + serverLabel(s) + ': all ' + report.ok.length + ' enabled mods are obtainable by clients')
-    return
-  }
-  const list = report.issues.map(i => i.id + (i.suggest.length === 1 ? ' -> ' + i.suggest[0] : ' (' + i.kind + ')')).join(', ')
-  logFor(s, 'clients cannot download ' + report.issues.length + ' enabled mod(s): ' + list)
-  const cfg = readNotifConfig()
-  if (cfg.enabled && cfg.events && cfg.events.modDrift !== false) {
-    pushoverFor(s, 'PZ Mods Unobtainable',
-      report.issues.length + ' enabled mod(s) cannot be downloaded by players: ' + list)
-  }
-}
-
-// Mods that are enabled but never registered — see modload.js for why the disk cannot answer this
-// and the boot log can. Runs once the ready marker is up, because by then the mod phase is over and
-// the log is complete for this run.
-//
-// An empty result means "no information" to reconcileMods, not "every mod is dead", so a failed or
-// truncated read stays silent instead of paging. That was true of `grep`'s exit 1 and stays true of
-// filtering the text: both hand back nothing.
-function reportDeadMods(s, since) {
-  docker.logsContaining(s.container, ['--since', since], '> loading ',
-    { maxBuffer: 8 * docker.MB }, (err, lines) => {
-      const r = reconcileMods(getIniList(s, 'Mods'), lines.join('\n'))
-      if (!r.known) return
-      if (!r.dead.length) {
-        console.log('[mods] ' + serverLabel(s) + ': all ' + r.loaded.length + ' enabled mods loaded')
-        return
-      }
-      const list = r.dead.join(', ')
-      logFor(s, 'enabled but did not load: ' + list)
-      const cfg = readNotifConfig()
-      if (cfg.enabled && cfg.events && cfg.events.modsNotLoaded !== false) {
-        pushoverFor(s, 'PZ Mods Not Loaded',
-          r.dead.length + ' enabled mod' + (r.dead.length > 1 ? 's' : '') + ' did not load: ' + list)
-      }
-    })
-}
-
-// Low disk monitor (shared filesystem — one check, one alert)
-let lowDiskAlerted = false
-setInterval(() => {
-  const cfg = readNotifConfig()
-  if (!cfg.enabled || !cfg.events || !cfg.events.lowDisk) return
-  disk.df('/workshop', cols => {
-    const availStr = cols.avail
-    // The threshold comparison reads the real figure rather than re-parsing df's suffix. The old
-    // parse understood only G, M and T, and answered 0 for anything else — so on a filesystem
-    // reporting K or P the alert silently never fired, which is exactly when it would matter.
-    const availGB = disk.freeBytes('/workshop') / (1024 * 1024 * 1024)
-    const threshold = cfg.lowDiskThresholdGB || 5
-    if (availGB > 0 && availGB < threshold && !lowDiskAlerted) {
-      lowDiskAlerted = true
-      pushover('PZ Server: Low Disk Space', availStr + ' remaining on server (' + cols.pct + ' used). Free up space before it fills.')
-    } else if (availGB >= threshold) {
-      lowDiskAlerted = false
-    }
-  })
-}, 300000)
-
-// Workshop download completion monitor
-setInterval(() => {
-  const cfg = readNotifConfig()
-  for (const s of allServers()) {
-    const st = mstate(s)
-    if (!cfg.enabled || !cfg.events || !cfg.events.downloadComplete) { st.wasDownloading = false; continue }
-    docker.logs(s.container, ['--tail', '500'], { maxBuffer: 4 * docker.MB }, (err, out) => {
-      const active = parseDownloads((out || '').split('\n'))
-      const isDownloading = active.length > 0
-      if (st.wasDownloading && !isDownloading) {
-        pushoverFor(s, 'PZ Mods Updated', 'All Workshop downloads complete. Restart server to apply mod updates.')
-      }
-      st.wasDownloading = isDownloading
-    })
-  }
-}, 30000)
-
-setInterval(() => { for (const s of allServers()) pollUserLog(s) }, 10000)
 
 // ===== STARTUP TASKS (per server) =====
 
@@ -298,94 +133,9 @@ for (const s of allServers()) {
 }
 
 
-// Every path that takes a container down goes through here — see save.js for why a plain
-// `docker stop` never gets the world written.
-function saveThen(s, next) {
-  saveThenGoDown({
-    rcon: (cmd, cb) => rconCommand(s, cmd, cb),
-    wait: (ms, cb) => setTimeout(cb, ms),
-    log: (m) => console.log('[RCON] ' + s.name + ' ' + m),
-  }, next)
-}
-
-// Every path that brings a container up goes through here, the same way every path that takes one
-// down goes through saveThen(). The sweep has to run on each boot, not once: Steam re-ships an
-// excluded folder on every download, and the only moment it matters is when PZ scans for mods.
-// A failed sweep must never block a restart — the server coming back up wins.
-function bringUp(s, action, timeout, cb) {
-  try { applyExcludes(s) }
-  catch (e) { console.error('[excludes] sweep failed for ' + s.name + ':', e.message) }
-  docker.control(action, s.container, timeout, cb)
-}
-
-function sendIngameMsg(s, msg) {
-  const safe = msg.replace(/"/g, "'")
-  rconCommand(s, 'servermsg "' + safe + '"', (err) => {
-    if (err) console.log('[RCON] ' + s.name + ' message failed (not active yet?):', err.message)
-    else console.log('[RCON] ' + s.name + ' sent:', msg)
-  })
-}
-
 // ===== SCHEDULE (per server) =====
 
-const INTERVAL_CHOICES = [2, 6, 12, 24]
 
-function readSchedule(s) {
-  try { return Object.assign({ mode: 'daily', intervalHours: 24 }, JSON.parse(fs.readFileSync(schedPath(s), 'utf8'))) }
-  catch { return { enabled: false, mode: 'daily', hour: 4, minute: 0, intervalHours: 24 } }
-}
-
-// Minutes until the next scheduled restart occurrence.
-// daily: once a day at hour:minute. interval: every N hours at :minute,
-// anchored so hour is one of the occurrences (e.g. hour=4, N=6 → 4,10,16,22).
-function minutesUntilRestart(sched, totalNow) {
-  const m = parseInt(sched.minute) || 0
-  if (sched.mode === 'interval') {
-    const iv = INTERVAL_CHOICES.includes(parseInt(sched.intervalHours)) ? parseInt(sched.intervalHours) : 24
-    const anchor = ((parseInt(sched.hour) || 0) % iv + iv) % iv
-    let best = Infinity
-    for (let h = anchor; h < 24; h += iv) {
-      const d = ((h * 60 + m - totalNow) + 1440) % 1440
-      if (d < best) best = d
-    }
-    return best
-  }
-  const target = ((parseInt(sched.hour) || 4) * 60 + m)
-  return ((target - totalNow) + 1440) % 1440
-}
-function writeSchedule(s, sched) { fs.writeFileSync(schedPath(s), JSON.stringify(sched, null, 2)) }
-
-const lastRestartMinute = {} // [serverId] = minute
-
-// Check every minute for scheduled restarts
-setInterval(() => {
-  const now = new Date()
-  const totalNow = now.getHours() * 60 + now.getMinutes()
-  for (const s of allServers()) {
-    const sched = readSchedule(s)
-    if (!sched.enabled) continue
-    // A reinstall owns the container while it runs — it stops it, moves files, and starts it
-    // again. A scheduled restart landing in that window would start the server mid-swap.
-    if (reinstallState.busy(s)) { console.log('[Schedule] ' + s.name + ': skipped, a mod reinstall is in progress'); continue }
-
-    const minutesBefore = minutesUntilRestart(sched, totalNow)
-
-    if (minutesBefore === 0 && lastRestartMinute[s.id] !== totalNow) {
-      lastRestartMinute[s.id] = totalNow
-      console.log('[Schedule] ' + s.name + ' scheduled restart triggered at', now.toLocaleTimeString())
-      mstate(s).intentionalStop = true
-      saveThen(s, () => bringUp(s, 'restart', 90000, (err) => {
-        if (err) return console.error('[Schedule] ' + s.name + ' restart failed:', err.message)
-        const desc = sched.mode === 'interval'
-          ? 'Server restarted on schedule (every ' + sched.intervalHours + 'h).'
-          : 'Server restarted on schedule at ' + (parseInt(sched.hour) || 4) + ':' + String(parseInt(sched.minute) || 0).padStart(2, '0')
-        pushoverFor(s, 'PZ Scheduled Restart', desc)
-      }))
-    } else if ([10, 5, 1].includes(minutesBefore)) {
-      sendIngameMsg(s, 'Server restarting in ' + minutesBefore + ' minute' + (minutesBefore > 1 ? 's' : '') + '!')
-    }
-  }
-}, 60000)
 
 // ===== BACKUP HELPERS =====
 
@@ -630,7 +380,6 @@ app.delete('/api/players/:username', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
-setInterval(() => { for (const s of allServers()) reconcileDownloads(s) }, 15000)
 
 // --- Mods list ---
 
@@ -1522,143 +1271,6 @@ app.post('/api/dependencies/fix-order', (req, res) => {
   })
 })
 
-// --- Mod auto-update ---
-//
-// Hourly: ask Steam whether any installed Workshop item has been updated, download the ones that
-// have, and — once the downloads finish and the server is empty — restart so they take effect.
-//
-// Off by default. It restarts a live game server, so every decision is conservative: a first
-// sighting only seeds the baseline (enabling it must not re-download 150 mods), and a restart
-// needs a genuinely pending update, no downloads in flight, and a confirmed-empty server.
-const AUTOUPDATE_CHECK_MS = 60 * 60 * 1000   // ask Steam at most hourly
-const AUTOUPDATE_TICK_MS = 5 * 60 * 1000     // but re-evaluate the restart condition often
-
-function readAutoUpdate(s) {
-  const def = { enabled: false, restartWhenEmpty: true, lastCheck: null, lastRestart: null, pending: [], times: {}, lastResult: '' }
-  try { return Object.assign(def, JSON.parse(fs.readFileSync(autoUpdatePath(s), 'utf8'))) }
-  catch { return def }
-}
-function writeAutoUpdate(s, cfg) {
-  try { fs.writeFileSync(autoUpdatePath(s), JSON.stringify(cfg, null, 2)) } catch (e) {}
-}
-
-// How many downloads are still in flight for this server.
-function activeDownloadCount(s, cb) {
-  docker.logs(s.container, ['--tail', '1500'], { maxBuffer: 8 * docker.MB }, (err, out) => {
-    const live = parseDownloads((out || '').split('\n')).length
-    const queued = readQueue(s).filter(e => e.status === 'queued').length
-    cb(live + queued)
-  })
-}
-
-// force=true is the manual "Check now" button: it runs the pass even while the hourly check is
-// switched off. Restarting is not forced with it — that still goes through shouldRestart(), which
-// refuses whenever auto-update is disabled.
-function runAutoUpdate(s, force) {
-  const cfg = readAutoUpdate(s)
-  if (!cfg.enabled && !force) return
-  // The reinstall owns the container and the ini while it runs, and "Check now" is no exception:
-  // a download queued underneath it would land in the middle of the file swap.
-  if (reinstallState.busy(s)) return console.log('[autoupdate] ' + serverLabel(s) + ': skipped, a mod reinstall is in progress')
-
-  const finish = () => writeAutoUpdate(s, cfg)
-
-  // Step 1 — restart if a previous pass left updates waiting and the server is now clear.
-  // Both inputs are asked of the running server first; playerCountFor() still reports null when
-  // nothing can answer, and shouldRestart() treats that as "someone might be on".
-  const decide = (active, players) => {
-    const verdict = shouldRestart({
-      enabled: cfg.enabled, restartWhenEmpty: cfg.restartWhenEmpty,
-      pending: cfg.pending, activeDownloads: active, playersOnline: players
-    })
-
-    if (verdict.restart) {
-      console.log('[autoupdate] ' + serverLabel(s) + ': restarting for ' + cfg.pending.length + ' updated mod(s)')
-      mstate(s).intentionalStop = true
-      markAwaitingReady(s)
-      saveThen(s, () => bringUp(s, 'restart', 120000, err => {
-        const cur = readAutoUpdate(s)
-        if (err) {
-          cur.lastResult = 'Restart failed: ' + err.message
-          console.error('[autoupdate] restart failed:', err.message)
-        } else {
-          cur.lastResult = 'Restarted for ' + cur.pending.length + ' updated mod(s) at ' + new Date().toISOString()
-          cur.lastRestart = new Date().toISOString()
-          // Only record the new stamps once the update has actually been applied — a failed
-          // download or restart is then retried rather than silently forgotten.
-          cur.times = seedState(cur.times, cur.pendingTimes || {})
-          cur.pending = []
-          cur.pendingTimes = {}
-          pushoverFor(s, 'PZ Mods Auto-Updated', 'Server was empty — restarted to apply updated mods.')
-        }
-        writeAutoUpdate(s, cur)
-      }))
-      return
-    }
-    if (cfg.pending.length) cfg.lastResult = 'Waiting to restart: ' + verdict.reason
-
-    // Step 2 — ask Steam, at most hourly.
-    if (!dueForCheck(Date.now(), cfg.lastCheck, AUTOUPDATE_CHECK_MS)) return finish()
-
-    const ids = getIniList(s, 'WorkshopItems')
-    fetchWorkshopTimes(ids, times => {
-      const cur = readAutoUpdate(s)
-      cur.lastCheck = new Date().toISOString()
-      const seeded = Object.keys(cur.times).length
-      const outdated = outdatedItems(cur.times, times)
-
-      if (!seeded) {
-        // First run: record what everything is at right now and do nothing else.
-        cur.times = seedState(cur.times, times)
-        cur.lastResult = 'Baseline recorded for ' + Object.keys(cur.times).length + ' mod(s) — updates will be detected from here on.'
-        console.log('[autoupdate] ' + serverLabel(s) + ': baseline recorded (' + Object.keys(cur.times).length + ' mods)')
-        return writeAutoUpdate(s, cur)
-      }
-
-      if (!outdated.length) {
-        // Nothing changed, but keep stamps current for ids seen for the first time.
-        cur.times = seedState(cur.times, times)
-        cur.lastResult = 'Checked ' + Object.keys(times).length + ' mod(s) — all up to date.'
-        return writeAutoUpdate(s, cur)
-      }
-
-      // Stamps are only recorded once a restart has applied them, so the same mod stays outdated
-      // on every check until then — deliberately, since that is what retries a failed download.
-      // What must not repeat is the download and the push for an id already sitting installed and
-      // waiting: on a server that stays busy that fired every hour, for days.
-      const installed = new Set(readQueue(s).filter(e => e.status === 'installed').map(e => String(e.id)))
-      const waiting = (cur.pending || []).filter(id => installed.has(String(id)))
-      const fresh = outdated.filter(id => !waiting.includes(id))
-
-      cur.pending = [...new Set([...(cur.pending || []), ...outdated])]
-      cur.pendingTimes = Object.assign({}, cur.pendingTimes || {}, times)
-
-      if (!fresh.length) {
-        cur.lastResult = cur.pending.length + ' update(s) downloaded — waiting for an empty server to restart.'
-        return writeAutoUpdate(s, cur)
-      }
-
-      // The download is held back on a busy server, not just the restart. It stays in
-      // cur.pending either way, so the next pass over an empty server picks it up.
-      const dl = shouldDownload({ playersOnline: players })
-      if (!dl.download) {
-        cur.lastResult = fresh.length + ' update(s) found — download held: ' + dl.reason
-        console.log('[autoupdate] ' + serverLabel(s) + ': ' + fresh.length + ' mod(s) updated on Steam — download held (' + dl.reason + ')')
-        return writeAutoUpdate(s, cur)
-      }
-
-      console.log('[autoupdate] ' + serverLabel(s) + ': ' + fresh.length + ' mod(s) updated on Steam — downloading')
-      cur.lastResult = fresh.length + ' update(s) downloading, queued ' + new Date().toISOString()
-      writeAutoUpdate(s, cur)
-      steamcmdDownload(s, fresh, 'autoupdate', null)
-      pushoverFor(s, 'PZ Mod Updates Found', fresh.length + ' mod(s) updated on Steam — downloading, will restart when the server is empty.')
-    })
-  }
-
-  activeDownloadCount(s, active => playerCountFor(s, players => decide(active, players)))
-}
-
-setInterval(() => { for (const s of allServers()) { try { runAutoUpdate(s) } catch (e) { console.error('[autoupdate]', e.message) } } }, AUTOUPDATE_TICK_MS)
 
 app.get('/api/mods/autoupdate', (req, res) => {
   const s = srv(req)
@@ -1855,51 +1467,7 @@ app.get('/api/collections', (req, res) => {
     res.json({ collections: out.map(c => Object.assign(c, { title: c.title || titles[c.id] || '' })) })
   })
 })
-
-// Install (or re-install) a collection: resolves nested collections down to real mod items,
-// records it in the registry, and queues anything not already present.
-//
-// Syncing is purely additive. Mods the curator has dropped are recorded on the registry entry
-// and surfaced — in the Mods tab and as an alert — but never deleted here. Deleting one out from
-// under a running server desyncs every connected client, and a mod vanishing as a silent side
-// effect of "check for updates" is indistinguishable from the server eating someone's save. The
-// operator removes them and restarts when it suits them.
-function installCollection(s, collectionId, cb) {
-  resolveCollectionLeaves(collectionId, (err, leaves, nested) => {
-    if (err) return cb(err)
-    getTitles([collectionId], titles => {
-      // Captured before the upsert overwrites it — this is what the collection used to contain.
-      const existing = readCollections(s).find(c => c.id === collectionId)
-      const previous = (existing && existing.items) || []
-      const installed = getIniList(s, 'WorkshopItems')
-      const have = new Set(installed)
-      const todo = leaves.filter(id => !have.has(id) || !hasModContent(s, id))
-      const dropped = droppedItems({
-        knownDropped: (existing && existing.droppedItems) || [],
-        previous,
-        leaves,
-        otherCollections: readCollections(s).filter(c => c.id !== collectionId),
-        installed
-      })
-      upsertCollection(s, {
-        id: collectionId,
-        title: titles[collectionId] || '',
-        items: leaves,
-        nestedCollections: nested || [],
-        droppedItems: dropped,
-        lastSynced: new Date().toISOString()
-      })
-      if (dropped.length) logFor(s, 'collection ' + collectionId + ': ' + dropped.length + ' dropped mod(s) still installed, awaiting removal [' + dropped.join(', ') + ']')
-      logFor(s, 'collection ' + collectionId + ' synced: ' + leaves.length + ' item(s), ' + todo.length + ' to download')
-      if (todo.length) steamcmdDownload(s, todo, 'collection', collectionId)
-      cb(null, {
-        total: leaves.length, queued: todo.length, nested: (nested || []).length,
-        dropped: dropped.length, droppedIds: dropped
-      })
-    })
-  })
-}
-
+// Re-check a tracked collection against Steam and pull in anything new or missing.
 app.post('/api/collections', (req, res) => {
   const s = srv(req)
   const { collectionId } = req.body || {}
@@ -1921,20 +1489,6 @@ app.post('/api/collections/:id/sync', (req, res) => {
   })
 })
 
-// Every mod the curators have dropped, across every tracked collection, that is still installed.
-// One flat list because that is how it gets acted on: remove them, then restart once.
-function allDroppedItems(s) {
-  const seen = new Set()
-  const out = []
-  for (const c of readCollections(s)) {
-    for (const id of (c.droppedItems || [])) {
-      if (seen.has(id)) continue
-      seen.add(id)
-      out.push({ id, collectionId: c.id, collectionTitle: c.title || '' })
-    }
-  }
-  return out
-}
 
 app.get('/api/collections/dropped', (req, res) => res.json({ dropped: allDroppedItems(srv(req)) }))
 
@@ -1974,15 +1528,6 @@ app.delete('/api/collections/:id', (req, res) => {
   res.json({ success: true, removedMods: removed })
 })
 
-// --- Scheduled collection auto-sync ---
-// Config lives alongside the registry so it survives restarts. Off by default.
-function readAutoSync(s) {
-  try { return Object.assign({ enabled: false, intervalHours: 24 }, JSON.parse(fs.readFileSync(autoSyncPath(s), 'utf8'))) }
-  catch { return { enabled: false, intervalHours: 24, lastRun: null } }
-}
-function writeAutoSync(s, cfg) {
-  try { fs.writeFileSync(autoSyncPath(s), JSON.stringify(cfg, null, 2)) } catch (e) {}
-}
 
 app.get('/api/collections/autosync', (req, res) => res.json(readAutoSync(srv(req))))
 
@@ -1997,34 +1542,6 @@ app.put('/api/collections/autosync', (req, res) => {
   res.json({ success: true })
 })
 
-setInterval(() => {
-  for (const s of allServers()) {
-    const cfg = readAutoSync(s)
-    if (!cfg.enabled) continue
-    const due = !cfg.lastRun || (Date.now() - new Date(cfg.lastRun).getTime()) >= cfg.intervalHours * 3600000
-    if (!due) continue
-    const list = readCollections(s)
-    if (!list.length) continue
-    cfg.lastRun = new Date().toISOString()
-    writeAutoSync(s, cfg)
-    console.log('[autosync] ' + s.name + ': syncing ' + list.length + ' collection(s)')
-    let queuedTotal = 0
-    let droppedTotal = 0
-    let pending = list.length
-    for (const c of list) {
-      installCollection(s, c.id, (err, r) => {
-        if (!err && r) { queuedTotal += r.queued; droppedTotal += r.dropped || 0 }
-        if (--pending <= 0 && (queuedTotal > 0 || droppedTotal > 0)) {
-          const parts = []
-          if (queuedTotal) parts.push('queued ' + queuedTotal + ' new/missing mod(s)')
-          // Deliberately worded as an outstanding task, not a completed one — nothing was removed.
-          if (droppedTotal) parts.push('found ' + droppedTotal + ' mod(s) dropped from their collection, still installed — remove them and restart')
-          pushoverFor(s, 'PZ Collection Sync', 'Auto-sync ' + parts.join(' and ') + '.')
-        }
-      })
-    }
-  }
-}, 10 * 60 * 1000)
 
 // ===== SERVER CONFIG =====
 
@@ -2435,6 +1952,10 @@ app.get('/api/players/online', (req, res) => {
 // registered before it.
 installErrorHandler(app)
 
+// Started only once the routes above are mounted: several monitors restart containers, and the
+// first tick should not land while the API is still half-wired.
+monitors.start()
+
 app.listen(7777, () => {
   console.log(
     'PZ Server Manager listening on container port 7777 (published to the host by docker-compose) — servers: ' +
@@ -2466,5 +1987,5 @@ app.listen(7777, () => {
   const n = readNotifConfig()
   logFor(null, 'notifications ' + (n.enabled ? 'ON' : 'off') +
     ' · Discord status ' + ((n.discord && n.discord.enabled) ? 'ON' : 'off'))
-  logFor(null, 'monitors: crash 60s · ready 20s · downloads 15s · user log 10s · auto-update 5m · Discord 5m')
+  logFor(null, 'monitors: ' + monitors.CADENCES)
 })
