@@ -1,0 +1,118 @@
+/* Styles specific to one feature: the load-order rows, the automation card that must not
+   read as a PZ setting, and the two-column config grids. */
+
+/* ============ LOAD ORDER ============ */
+/* The position box has to read as part of the button strip beside it, so it borrows .btn-sm's
+   metrics exactly — same font size, radius, border and height — rather than looking like a stray
+   form field dropped into a row of controls. */
+#order-list { scrollbar-color: rgba(148,163,255,.45) rgba(0,0,0,.25) }
+#order-list::-webkit-scrollbar { width: 12px }
+#order-list::-webkit-scrollbar-track { background: rgba(0,0,0,.25); border-radius: 999px }
+#order-list::-webkit-scrollbar-thumb { background: rgba(148,163,255,.42); border-radius: 999px; border: 3px solid transparent; background-clip: padding-box }
+#order-list::-webkit-scrollbar-thumb:hover { background: rgba(148,163,255,.65); border: 3px solid transparent; background-clip: padding-box }
+
+.order-row {
+  display: flex; align-items: center; gap: .4rem;
+  padding: .3rem .5rem; border-bottom: 1px solid var(--border);
+}
+/* Clears the 12px scrollbar so the last button is never sitting under it. */
+.order-row > :last-child { margin-right: .55rem }
+.order-row .ord-label { flex: 1; font-size: .8rem; min-width: 0; word-break: break-word }
+/* Position is a read-only label. The only way to change it is a control, not a field you might
+   have half-edited and forgotten. */
+.ord-num {
+  flex: 0 0 auto; width: 2.6rem; text-align: right;
+  font-family: var(--font-mono); font-size: .72rem; color: var(--muted);
+}
+/* The editor replaces the Move to button in place, so the row never changes width or reflows.
+   The [hidden] rule is not optional: a class setting display beats the browser's own
+   [hidden]{display:none}, which would leave the editor showing on all 173 rows at once. */
+.ord-moveto { display: inline-flex; align-items: center; gap: .3rem }
+.ord-moveto[hidden], .ord-moveto-btn[hidden] { display: none }
+.ord-pos {
+  width: 3.6rem; text-align: center; flex: 0 0 auto;
+  font-family: var(--font-mono); font-size: .76rem;
+  padding: .32rem .35rem; border-radius: 7px;
+  background: rgba(0,0,0,.45); border: 1px solid rgba(244,63,94,.55); color: var(--text);
+}
+.ord-pos:focus { outline: none; box-shadow: 0 0 0 3px rgba(244,63,94,.14) }
+
+#mlog-count { color: var(--muted); font-size: .78rem; margin-left: auto; font-family: var(--font-mono) }
+.log-line { padding: .05rem 0 }
+.log-ts { color: rgba(74,222,128,.35); margin-right: .5rem }
+.log-warn { color: #fcd34d }
+.log-error { color: #fca5a5; text-shadow: 0 0 8px rgba(248,113,113,.35) }
+.log-info { color: #7dd3fc }
+.log-default { color: rgba(134,239,172,.72) }
+.log-controls { display: flex; gap: .6rem; align-items: center; margin-bottom: .85rem; flex-wrap: wrap }
+.log-controls input { width: 200px }
+#log-count { color: var(--muted); font-size: .78rem; margin-left: auto; font-family: var(--font-mono) }
+
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,.2); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite }
+@keyframes spin { to { transform: rotate(360deg) } }
+
+.empty { color: var(--muted); text-align: center; padding: 2.5rem 1rem; font-style: italic; font-size: .84rem }
+
+.backup-section { margin-bottom: 1.4rem }
+.backup-section-label {
+  font-family: var(--font-mono);
+  font-size: .62rem; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .18em; margin-bottom: .6rem;
+  display: flex; align-items: center; gap: .5rem;
+}
+.backup-section-label::before { content: ''; width: 6px; height: 6px; border-radius: 2px; background: var(--accent2); opacity: .6 }
+
+.progress-bar-wrap { background: rgba(0,0,0,.4); border: 1px solid var(--border); border-radius: 999px; height: 9px; overflow: hidden; margin-top: .5rem }
+.progress-bar {
+  height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, #38bdf8, #5eead4);
+  box-shadow: 0 0 12px rgba(94,234,212,.5);
+  transition: width .2s;
+  position: relative; overflow: hidden;
+}
+.progress-bar::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.45), transparent);
+  animation: shimmer 1.4s linear infinite;
+}
+@keyframes shimmer { from { transform: translateX(-100%) } to { transform: translateX(100%) } }
+
+/* ============ MANAGER AUTOMATION CARD ============ */
+/* Sits at the top of Config and must not read as a PZ setting: accent edge, its own badge, and
+   sub-sections instead of two separate cards on two separate tabs. */
+.mgr-card {
+  border-color: rgba(244,63,94,.32);
+  background:
+    linear-gradient(180deg, rgba(244,63,94,.06), transparent 120px),
+    var(--bg2);
+}
+.mgr-card > details > summary { border-bottom: 1px solid var(--border) ; padding-bottom: .7rem }
+.pill {
+  display: inline-block; vertical-align: middle;
+  margin-left: .6rem; padding: .18rem .55rem;
+  border: 1px solid rgba(244,63,94,.35); border-radius: 999px;
+  background: rgba(244,63,94,.1);
+  color: #fda4b4;
+  font-family: var(--font-mono); font-size: .6rem; font-weight: 500;
+  letter-spacing: .12em; text-transform: uppercase;
+  white-space: nowrap;
+}
+.mgr-note { font-size: .8rem; color: var(--muted); margin: .9rem 0 1.2rem }
+.mgr-section { padding: 1.1rem 0; border-top: 1px solid var(--border) }
+.mgr-section:first-of-type { border-top: none; padding-top: .2rem }
+.mgr-head {
+  font-family: var(--font-display); font-size: .95rem; font-weight: 700;
+  letter-spacing: .02em; margin-bottom: .9rem;
+}
+.mgr-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap }
+.mgr-hint { font-size: .78rem; color: var(--muted); margin-bottom: 1rem }
+.toggle-label { display: flex; align-items: center; gap: .6rem; cursor: pointer; font-size: .875rem }
+
+.time-picker { display: flex; align-items: center; gap: .5rem }
+.time-picker input[type=number] { width: 64px; text-align: center; font-size: 1.05rem; padding: .45rem; font-family: var(--font-mono) }
+.time-picker span { color: var(--muted); font-size: 1.1rem; font-weight: 700 }
+
+/* Two-column form grids in Config. A class rather than the inline styles they replaced, so the
+   phone breakpoint can collapse them without !important. */
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.5rem }
+.form-grid-tight { gap: .7rem }

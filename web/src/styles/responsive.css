@@ -1,0 +1,101 @@
+/* Tablet, then phone. The sidebar becomes a top bar, then the top bar wraps. */
+
+/* ============ RESPONSIVE ============ */
+/* Tablet / small laptop: the sidebar becomes a top bar. */
+@media (max-width: 900px) {
+  .sidebar { position: sticky; top: 0; bottom: auto; width: 100%; flex-direction: row; align-items: center; gap: .75rem; padding: .6rem .9rem; border-right: none; border-bottom: 1px solid var(--border) }
+  .sidebar::before { display: none }
+  .brand { margin-bottom: 0; padding: 0 }
+  .logo small { display: none }
+  .logo { font-size: .95rem }
+  #status-badge { margin: 0 }
+  nav { flex-direction: row; flex-wrap: wrap; margin-left: auto; gap: .15rem }
+  .tab-btn { width: auto; padding: .5rem .6rem }
+  .tab-btn span { display: none }
+  .tab-btn.active::before { display: none }
+  .sidebar-foot { display: none }
+  .app { flex-direction: column }
+  main { margin-left: 0; padding: 1.25rem 1rem 3rem }
+}
+
+/* ============ PHONE ============ */
+/* The top bar cannot hold brand + status + server picker + seven tabs on one line at 390px, so it
+   wraps into three: identity, server picker, then the tab strip as its own scrollable row. */
+@media (max-width: 620px) {
+  .sidebar { flex-wrap: wrap; gap: .5rem .75rem; padding: .55rem .75rem }
+  .brand { order: 1 }
+  #status-badge { order: 2; margin-left: auto }
+  .sidebar > div:has(#server-select) { order: 3; flex: 1 0 100% }
+  .server-select { margin: 0 }
+  nav {
+    order: 4; flex: 1 0 100%; margin-left: 0;
+    flex-wrap: nowrap; overflow-x: auto; gap: .2rem;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  nav::-webkit-scrollbar { display: none }
+  .tab-btn { flex: 0 0 auto; min-width: 46px; min-height: 42px; justify-content: center; padding: .5rem }
+  .tab-btn svg { width: 20px; height: 20px }
+
+  main { padding: 1rem .7rem 2.5rem }
+  .pane-head { margin-bottom: 1.1rem }
+  .pane-head h1 { font-size: 1.5rem }
+  .pane-head p { font-size: .78rem }
+  .card { padding: 1rem .9rem; margin-bottom: 1rem; border-radius: 12px }
+
+  /* Denser stat tiles: three per row at 390px instead of two with dead space. */
+  .stat-grid { grid-template-columns: repeat(auto-fit, minmax(102px, 1fr)); gap: .55rem }
+  .stat { padding: .7rem .5rem }
+
+  /* Anything two-up becomes one-up: config fields, gameplay flags, sandbox rows. */
+  .form-grid, .grid2, .sandbox-field { grid-template-columns: 1fr !important }
+
+  /* Tables keep their columns and scroll sideways inside the card rather than squashing to
+     illegible or pushing the whole page wide. Covers the JS-rendered tables too. */
+  .card table { display: block; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch }
+  .card table th, .card table td { white-space: nowrap }
+
+  /* 16px is the threshold below which iOS Safari zooms the page on focus. */
+  input, select, textarea { font-size: 16px }
+  .server-select { font-size: 15px }
+  input[type=checkbox] { font-size: inherit }
+
+  /* Comfortable touch targets, and full-width action buttons instead of a cramped wrap. */
+  button { min-height: 42px }
+  .btn-sm { min-height: 34px }
+  .control-row { gap: .5rem }
+  .control-row > button { flex: 1 1 46%; justify-content: center }
+  /* Input-plus-button rows: the button keeps its label on one line, the input takes the rest. */
+  .row > button { flex: 0 0 auto; white-space: nowrap }
+
+  /* The badge earns its own line rather than squeezing the title into two words per row. */
+  .card-title { flex-wrap: wrap }
+  .pill { margin-left: 0; margin-top: .35rem }
+  /* Selects, labels and the time picker stack instead of wrapping into ragged rows. */
+  .mgr-row { flex-direction: column; align-items: flex-start; gap: .6rem }
+  .mgr-row .server-select { width: 100% }
+  #log-output { height: 55vh }
+  #mlog-output { height: 30vh; min-height: 150px }
+}
+.server-select {
+  width: 100%;
+  margin: 10px 0 4px;
+  padding: 8px 10px;
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.server-select:hover { border-color: var(--accent); }
+.server-select:focus { outline: 1px solid var(--accent); }
+.server-select option {
+  background: #14141f;
+  color: var(--text);
+}
+.server-select option:checked {
+  background: var(--accent);
+  color: #fff;
+}

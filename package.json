@@ -9,10 +9,10 @@
   "scripts": {
     "start": "node server.js",
     "dev": "vite",
-    "build": "tsc -b web && vite build",
+    "build": "tsc --noEmit -p web/tsconfig.json && vite build",
     "preview": "vite preview",
     "test": "node --test lib/ src/",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json",
     "check": "npm run typecheck && npm test"
   },
   "dependencies": {

@@ -1,0 +1,48 @@
+/* Cards, and the collapsible variant whose disclosure caret is drawn rather than native. */
+
+/* ============ CARDS ============ */
+.card {
+  position: relative;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.4rem 1.5rem;
+  margin-bottom: 1.4rem;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 8px 32px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.045);
+  transition: border-color .25s;
+}
+.card:hover { border-color: var(--border-strong) }
+.card-title {
+  font-family: var(--font-mono);
+  font-size: .68rem; font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase; letter-spacing: .22em;
+  margin-bottom: 1.1rem;
+  display: flex; align-items: center; gap: .6rem;
+}
+.card-title::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(244,63,94,.3), transparent) }
+
+/* Collapsible cards. The native disclosure marker is suppressed and replaced with a caret drawn
+   as the first flex item of .card-title, so it sits inline immediately before the title text
+   rather than on its own line above it (which is where a flex <summary> puts the default one). */
+details > summary { list-style: none; cursor: pointer; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::marker { content: ''; }
+details > summary .card-title::before {
+  content: '\25B8';
+  display: inline-block;
+  color: var(--accent);
+  font-size: .72rem;
+  line-height: 1;
+  transform-origin: 50% 50%;
+  transition: transform .15s ease;
+}
+details[open] > summary .card-title::before { transform: rotate(90deg); }
+details > summary:hover .card-title { color: #fff }
+/* A collapsed card should not keep the title's bottom gap. */
+details:not([open]) > summary .card-title { margin-bottom: 0 }
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4rem }
+@media (max-width: 700px) { .grid2 { grid-template-columns: 1fr } }
