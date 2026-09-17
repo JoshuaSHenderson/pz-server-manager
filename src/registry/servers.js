@@ -264,7 +264,7 @@ function guard(req, res, next) {
   if (SERVERS[id]) return next()
   refreshServers() // it may have appeared since the last 60s scan
   if (SERVERS[id]) return next()
-  res.status(404).json({ error: 'Unknown server "' + id + '" - it may have been removed.', code: 'UNKNOWN_SERVER' })
+  res.status(404).json({ error: 'Unknown server "' + id + '" — it may have been removed.', code: 'UNKNOWN_SERVER' })
 }
 
 module.exports = {
