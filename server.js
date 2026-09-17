@@ -26,6 +26,18 @@ const { humanBytes } = disk
 const { ACCESS_LEVELS } = db
 const whitelist = require('./src/services/whitelist')
 const { rconCommand } = require('./src/infra/rcon')
+const { logFor } = require('./src/log')
+const reinstallState = require('./src/services/reinstall-state')
+const { QUARANTINE_KEEP: REINSTALL_QUARANTINE_KEEP, DOWNLOAD_TIMEOUT_MS: REINSTALL_DOWNLOAD_TIMEOUT_MS } = reinstallState
+const registry = require('./src/registry/servers')
+const { readCollections, writeCollections, upsertCollection } = require('./src/services/collections')
+const { readExcludes, writeExcludes, folderProviders, applyExcludes } = require('./src/services/excludes')
+const {
+  readQueue, writeQueue, queueAdd, hasModContent, registerInstalledMod, steamcmdDownload,
+  stripAnsi, explainDownloadFailure, reconcileDownloads, parseDownloads,
+} = require('./src/services/downloads')
+const { refreshServers, serverLabel, serverRow, srv, readServerConfig, writeServerConfig } = registry
+const allServers = registry.all
 const {
   steamFileDetails, steamCollectionDetails, getCollectionChildren, resolveCollectionLeaves,
   getTitles, getCachedTags, fetchWorkshopTimes,
@@ -66,197 +78,10 @@ app.use(express.static(WEB_DIST))
 // anything registered above this line would be reachable without a token.
 const MANAGER_AUTH = auth.install(app)
 
-// ===== SERVER REGISTRY =====
-// A managed PZ server is a Docker container plus the data/workshop paths this manager has
-// mounted for it. Three inputs, merged in refreshServers():
-//   1. auto-discovery  — every PZ-image container whose data dir we can actually read
-//   2. servers.json    — user overrides (rename / connect / hide / default), keyed by CONTAINER
-//   3. SEED_SERVERS    — bootstrap labels for a first run before anything is customised
-// A server only reaches the picker if its container exists *right now*. That is the rule that
-// stops removed servers (e.g. the old zomboid42 sandbox) lingering as unusable ghost entries.
-// Deliberately carries no `name`: a hardcoded label here outlives whatever the container actually
-// runs (the original 'Build 41' seed was still being applied to a container running B42), and it
-// would override the server's own PublicName. serverLabel() resolves the display name instead —
-// user override first, then the live PublicName, then the container name.
-const SEED_SERVERS = {
-  zomboid: { id: 'b41', data: '/pz-data', workshop: '/workshop', connect: '192.168.1.20:16261' },
-}
-const PZ_IMAGE = 'danixu86/project-zomboid-dedicated-server'
-const SERVERS_JSON = '/pz-data/servers.json'
-
-// Overrides are keyed by container name, not by id: the container is the stable real-world
-// identity, while an id is just a label the user is allowed to change.
-function readServerConfig() {
-  let raw
-  try { raw = JSON.parse(fs.readFileSync(SERVERS_JSON, 'utf8')) }
-  catch { return { overrides: {}, hidden: [], default: '' } }
-  if (raw && raw.overrides) {
-    return { overrides: raw.overrides || {}, hidden: raw.hidden || [], default: raw.default || '' }
-  }
-  // Legacy shape: a flat { id: {container, ...} } map written before overrides/hidden existed.
-  const overrides = {}
-  for (const [id, s] of Object.entries(raw || {})) {
-    if (s && s.container) overrides[s.container] = Object.assign({}, s, { id })
-  }
-  return { overrides, hidden: [], default: '' }
-}
-function writeServerConfig(cfg) {
-  fs.writeFileSync(SERVERS_JSON, JSON.stringify({
-    overrides: cfg.overrides || {},
-    hidden: cfg.hidden || [],
-    default: cfg.default || '',
-  }, null, 2))
-}
-
-// Every container on the box right now, name -> state. Returns null (not an empty map) if
-// docker can't be reached, so a transient failure never prunes the whole registry.
-function liveContainers() {
-  const all = docker.psAll()
-  return all ? new Map(Object.entries(all)) : null
-}
-
-// This container's own bind mounts, so we know which host-side paths we can actually read.
-function ownMounts() {
-  const id = docker.ownId()
-  return id ? docker.mounts(id) : []
-}
-
-// Auto-detects any running/stopped PZ dedicated-server container this manager can actually
-// see the data for (i.e. its /home/steam/Zomboid mount matches one of our own mounted paths).
-// Lets a newly added PZ server show up without a manual servers.json/code edit — the only
-// thing still required is giving mod-manager a matching volume mount in docker-compose.yml.
-function discoverServers() {
-  const mine = ownMounts()
-  const dataMounts = mine.filter(m => /^\/pz-data\d*$/.test(m.Destination))
-  const workshopMounts = mine.filter(m => /^\/workshop\d*$/.test(m.Destination))
-  // The server's force_install_dir. Optional: a manager without this mount still manages the
-  // server, it just can't reinstall — see installContent().
-  const installMounts = mine.filter(m => /^\/pz-install\d*$/.test(m.Destination))
-  const names = docker.psByImage(PZ_IMAGE)
-
-  const found = {}
-  for (const name of names) {
-    try {
-      const mounts = docker.mounts(name)
-      const dataMount = mounts.find(m => m.Destination === '/home/steam/Zomboid')
-      if (!dataMount) continue
-      const ourData = dataMounts.find(m => m.Source === dataMount.Source)
-      if (!ourData) continue // this manager can't see that server's files — nothing to manage yet
-
-      const suffix = ourData.Destination.replace('/pz-data', '')
-      const workshopMount = mounts.find(m => m.Destination.endsWith('/workshop'))
-      const ourWorkshop = workshopMounts.find(m => m.Destination === '/workshop' + suffix)
-        || (workshopMount && workshopMounts.find(m => m.Source === workshopMount.Source))
-        || workshopMounts[0]
-
-      // Matched by mount source, never by convention: this is the tree the game actually loads
-      // from, and pointing a purge at the wrong server's copy is not a recoverable mistake.
-      const installMount = mounts.find(m => m.Destination === '/home/steam/pz-dedicated')
-      const ourInstall = (installMount && installMounts.find(m => m.Source === installMount.Source))
-        || installMounts.find(m => m.Destination === '/pz-install' + suffix)
-
-      found[name] = {
-        id: name,
-        name: name,
-        container: name,
-        data: ourData.Destination,
-        workshop: ourWorkshop ? ourWorkshop.Destination : '/workshop',
-        install: ourInstall ? ourInstall.Destination : '',
-        connect: ''
-      }
-    } catch (e) { console.error('[discover] ' + name + ':', e.message) }
-  }
-  return found
-}
-
-// Discovery is authoritative about what *exists*; config is authoritative about what it's
-// *called* and whether it's shown. Everything is keyed by container while merging so a rename
-// can't fork one server into two entries.
-function refreshServers() {
-  const cfg = readServerConfig()
-  const live = liveContainers()
-  const discovered = discoverServers()
-  const byContainer = {}
-
-  for (const s of Object.values(discovered)) {
-    byContainer[s.container] = Object.assign({}, s, { discovered: true })
-  }
-
-  // Seeds/overrides only get added if discovery missed them AND their container really exists.
-  // (Discovery misses a server whose data dir this manager has no matching mount for — still
-  // worth listing so start/stop/logs work, even though file-level features won't.)
-  const seeds = {}
-  for (const [container, s] of Object.entries(SEED_SERVERS)) seeds[container] = Object.assign({ container }, s)
-  for (const [container, s] of Object.entries(cfg.overrides)) {
-    seeds[container] = Object.assign({}, seeds[container], s, { container })
-  }
-  for (const [container, s] of Object.entries(seeds)) {
-    if (byContainer[container]) continue
-    if (live && !live.has(container)) continue // ghost — container is gone, don't list it
-    byContainer[container] = Object.assign({ id: container, name: container, data: '', workshop: '', install: '' }, s, { discovered: false })
-  }
-
-  // Apply labels (seed defaults, then user overrides on top) to whatever survived — including
-  // discovered entries, which know the paths but not what the server should be called.
-  for (const [container, o] of Object.entries(seeds)) {
-    const t = byContainer[container]
-    if (!t) continue
-    if (o.id) t.id = o.id
-    if (o.name) t.name = o.name
-    if (o.connect !== undefined) t.connect = o.connect
-    if (o.data) t.data = o.data
-    if (o.workshop) t.workshop = o.workshop
-    // Only ever set from servers.json, never from SEED_SERVERS — discovery's value is verified
-    // against the container's own mount and must win over any hardcoded guess.
-    if (o.install) t.install = o.install
-  }
-
-  const hidden = new Set(cfg.hidden || [])
-  const shown = {}
-  const hiddenList = []
-  for (const s of Object.values(byContainer)) {
-    s.state = live ? (live.get(s.container) || 'unknown') : 'unknown'
-    if (hidden.has(s.container)) hiddenList.push(s)
-    else shown[s.id] = s
-  }
-
-  SERVERS = shown
-  HIDDEN_SERVERS = hiddenList
-  // Configured entries whose container no longer exists. Surfaced in the UI (not silently
-  // dropped) so a server that disappeared is an explicit "forget this" decision.
-  STALE_SERVERS = live
-    ? Object.entries(seeds)
-        .filter(([container]) => !live.has(container))
-        .map(([container, s]) => Object.assign({ container, state: 'missing' }, s))
-    : []
-  SERVER_DEFAULT = SERVERS[cfg.default] ? cfg.default : Object.keys(SERVERS)[0] || ''
-}
-let SERVERS = {}
-let HIDDEN_SERVERS = []
-let STALE_SERVERS = []
-let SERVER_DEFAULT = ''
 refreshServers()
 setInterval(refreshServers, 60000)
 
-// Resolve the server a request targets (?server=b42); falls back to the default.
-// Unknown ids never silently fall through here — the /api guard below rejects them first, so
-// a stale bookmark/localStorage can't end up writing config into a different server.
-function srv(req) {
-  return SERVERS[(req.query && req.query.server) || ''] || SERVERS[SERVER_DEFAULT]
-}
-function allServers() { return Object.values(SERVERS) }
-
-// Single guard for all 27+ per-server endpoints: an explicit ?server= that doesn't resolve is a
-// 404, not a silent redirect to some other server. /api/servers* is exempt so the UI can always
-// re-read the list and repair itself.
-app.use('/api', (req, res, next) => {
-  const id = req.query && req.query.server
-  if (!id || req.path.startsWith('/servers')) return next()
-  if (SERVERS[id]) return next()
-  refreshServers() // may have appeared since the last 60s scan
-  if (SERVERS[id]) return next()
-  res.status(404).json({ error: 'Unknown server "' + id + '" — it may have been removed.', code: 'UNKNOWN_SERVER' })
-})
+app.use('/api', registry.guard)
 
 
 // Notifications config stays global (one Pushover account for the whole box)
@@ -333,7 +158,7 @@ function writeNotifConfig(cfg) {
 // Operator-visible activity log. Anything this manager does that changes state gets a line, so
 // the Manager Logs pane answers "what did it just do?" without anyone reading the source.
 // Docker adds the timestamps (the log stream is requested with --timestamps), so none here.
-function logFor(s, msg) { console.log('[' + (s ? serverLabel(s) : 'manager') + '] ' + msg) }
+
 
 function pushover(title, message) {
   const cfg = readNotifConfig()
@@ -567,32 +392,7 @@ function updateDiscordStatus(cb) {
     })
   })
 }
-
 setInterval(updateDiscordStatus, 5 * 60 * 1000)
-
-// --- Download state parser ---
-function parseDownloads(lines) {
-  const state = {}
-  for (const line of lines) {
-    let m = line.match(/Workshop: download (\d+)\/(\d+) ID=(\d+)/)
-    if (m) { state[m[3]] = { status: 'downloading', downloaded: parseInt(m[1]), total: parseInt(m[2]) }; continue }
-    m = line.match(/onItemDownloaded.*ID=(\d+)/)
-    if (m) { state[m[1]] = { status: 'done' }; continue }
-    m = line.match(/CheckItemState\s*->\s*Ready.*ID=(\d+)/)
-    if (m) { state[m[1]] = { status: 'ready' }; continue }
-    m = line.match(/ID=(\d+).*=\s*(NeedsUpdate|None)\b/)
-    if (m && !state[m[1]]) { state[m[1]] = { status: 'pending' }; continue }
-    m = line.match(/GetItemState\(\).*ID=(\d+).*=\s*(NeedsUpdate|None)\b/)
-    if (m && !state[m[1]]) { state[m[1]] = { status: 'pending' }; continue }
-  }
-  return Object.entries(state)
-    .filter(([, s]) => s.status === 'downloading' || s.status === 'pending')
-    .map(([id, s]) => ({
-      workshopId: id, status: s.status,
-      downloaded: s.downloaded || 0, total: s.total || 0,
-      pct: s.total ? Math.round(s.downloaded / s.total * 100) : 0
-    }))
-}
 
 // --- Background monitors (all per-server) ---
 const monitorState = {} // [serverId] = { lastKnownStatus, intentionalStop, wasDownloading, userLogPath, userLogPos }
@@ -631,7 +431,7 @@ setInterval(() => {
       const status = (out || '').trim()
       const st = mstate(s)
       const cfg = readNotifConfig()
-      if (st.lastKnownStatus === 'running' && status !== 'running' && !st.intentionalStop && !reinstallBusy(s)) {
+      if (st.lastKnownStatus === 'running' && status !== 'running' && !st.intentionalStop && !reinstallState.busy(s)) {
         if (cfg.enabled && cfg.events && cfg.events.serverCrash) {
           pushoverFor(s, 'PZ Server Crashed', 'Server stopped unexpectedly. Container status: ' + status)
         }
@@ -973,7 +773,7 @@ setInterval(() => {
     if (!sched.enabled) continue
     // A reinstall owns the container while it runs — it stops it, moves files, and starts it
     // again. A scheduled restart landing in that window would start the server mid-swap.
-    if (reinstallBusy(s)) { console.log('[Schedule] ' + s.name + ': skipped, a mod reinstall is in progress'); continue }
+    if (reinstallState.busy(s)) { console.log('[Schedule] ' + s.name + ': skipped, a mod reinstall is in progress'); continue }
 
     const minutesBefore = minutesUntilRestart(sched, totalNow)
 
@@ -1018,35 +818,12 @@ function validBackupPath(s, type, name) {
   return p
 }
 
-// ===== SERVERS LIST =====
-
-// A server's display name: the user's override wins, else the server's own live PublicName,
-// else the container name. Never blank.
-function serverLabel(s) {
-  const cfg = readServerConfig()
-  const override = (cfg.overrides[s.container] || {}).name
-  if (override) return override
-  try { return getIniValue(s, 'PublicName') || s.name || s.container } catch { return s.name || s.container }
-}
-function serverRow(s, extra) {
-  return Object.assign({
-    id: s.id,
-    name: serverLabel(s),
-    container: s.container,
-    connect: s.connect || '',
-    state: s.state || 'unknown',
-    discovered: !!s.discovered,
-    managed: !!s.data, // false = container visible but its data dir isn't mounted here
-    reinstallable: !!s.install, // false = force_install_dir not mounted here, so no clean reinstall
-  }, extra)
-}
-
 app.get('/api/servers', (req, res) => {
   res.json({
-    default: SERVER_DEFAULT,
+    default: registry.defaultId(),
     servers: allServers().map(s => serverRow(s)),
-    hidden: HIDDEN_SERVERS.map(s => serverRow(s, { hidden: true })),
-    stale: STALE_SERVERS.map(s => ({
+    hidden: registry.hidden().map(s => serverRow(s, { hidden: true })),
+    stale: registry.stale().map(s => ({
       id: s.id || s.container, name: s.name || s.container, container: s.container,
       state: 'missing', discovered: false, managed: false,
     })),
@@ -1059,14 +836,7 @@ app.post('/api/servers/refresh', (req, res) => {
   res.json({ success: true, count: allServers().length })
 })
 
-// Find a server by id across shown/hidden/stale — needed because you manage exactly the ones
-// that aren't currently selectable.
-function anyServerById(id) {
-  return SERVERS[id]
-    || HIDDEN_SERVERS.find(s => s.id === id)
-    || STALE_SERVERS.find(s => (s.id || s.container) === id)
-    || null
-}
+const anyServerById = id => registry.anyById(id) || null
 
 // Rename / set connect / hide / make default. One endpoint, all persisted to servers.json.
 app.put('/api/servers/:id', (req, res) => {
@@ -1098,7 +868,7 @@ app.put('/api/servers/:id', (req, res) => {
 
   writeServerConfig(cfg)
   refreshServers()
-  res.json({ success: true, default: SERVER_DEFAULT, servers: allServers().map(s => serverRow(s)) })
+  res.json({ success: true, default: registry.defaultId(), servers: allServers().map(s => serverRow(s)) })
 })
 
 // Forget a server: drops its saved override and un-hides it. For a stale entry (container gone)
@@ -1113,7 +883,7 @@ app.delete('/api/servers/:id', (req, res) => {
   writeServerConfig(cfg)
   refreshServers()
   const stillThere = !!anyServerById(target.id)
-  res.json({ success: true, removed: !stillThere, default: SERVER_DEFAULT })
+  res.json({ success: true, removed: !stillThere, default: registry.defaultId() })
 })
 
 // ===== SERVER CONTROL =====
@@ -1267,327 +1037,6 @@ app.delete('/api/players/:username', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
-// ===== MODS =====
-
-
-// --- Collections registry (persisted per server) ---
-// Tracks which collections were installed here so they can be listed, re-synced (to pick up
-// items added to the collection upstream), and removed.
-function readCollections(s) {
-  try { return JSON.parse(fs.readFileSync(collectionsPath(s), 'utf8')) } catch { return [] }
-}
-function writeCollections(s, list) {
-  try { fs.writeFileSync(collectionsPath(s), JSON.stringify(list, null, 2)) }
-  catch (e) { console.error('[collections] write failed:', e.message) }
-}
-function upsertCollection(s, entry) {
-  const list = readCollections(s)
-  const i = list.findIndex(c => c.id === entry.id)
-  if (i >= 0) list[i] = Object.assign(list[i], entry)
-  else list.push(entry)
-  writeCollections(s, list)
-}
-
-// --- Download queue (persisted — survives a mod-manager container restart) ---
-// One JSON array per server: { id, source, collectionId, status: 'queued'|'installed'|'failed',
-// queuedAt, updatedAt, error, modIds, copiedFolders }
-function readQueue(s) {
-  try { return JSON.parse(fs.readFileSync(queuePath(s), 'utf8')) } catch { return [] }
-}
-function writeQueue(s, queue) {
-  try { fs.writeFileSync(queuePath(s), JSON.stringify(queue.slice(-300), null, 2)) }
-  catch (e) { console.error('[queue] write failed:', e.message) }
-}
-function queueAdd(s, workshopIds, source, collectionId) {
-  const queue = readQueue(s)
-  const now = new Date().toISOString()
-  // Drop any prior terminal record for the same id so re-installs don't stack up duplicates.
-  const kept = queue.filter(e => !(workshopIds.includes(e.id) && e.status !== 'queued'))
-  for (const id of workshopIds) {
-    if (kept.some(e => e.id === id && e.status === 'queued')) continue
-    kept.push({ id, source, collectionId: collectionId || null, status: 'queued', queuedAt: now, updatedAt: now })
-  }
-  writeQueue(s, kept)
-}
-
-// True when this Workshop item has real, loadable mod content on disk.
-function hasModContent(s, workshopId) {
-  return modFolders(s, workshopId).length > 0
-}
-
-// ===== EXCLUDED MOD FOLDERS =====
-//
-// See excludes.js for why this exists. Short version: a Workshop item can ship a folder that
-// breaks the server, Steam re-ships it on every download, and the only durable answer is to
-// delete it again after each one.
-function readExcludes(s) {
-  try {
-    const v = JSON.parse(fs.readFileSync(excludesPath(s), 'utf8'))
-    return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {}
-  } catch { return {} }
-}
-// Deliberately allowed to throw, unlike writeDepIgnores: a silently dropped write here means the
-// exclusion is gone on the next download and the server quietly goes back to booting wrong.
-function writeExcludes(s, map) {
-  fs.writeFileSync(excludesPath(s), JSON.stringify(map, null, 2))
-}
-
-// Which installed Workshop items ship a mod folder by this name. Two items shipping the same
-// folder name is rare but real, and it decides whether the shared copy in <data>/mods can be
-// deleted — removing another item's only copy is precisely the "mod vanished from the save"
-// failure this whole change exists to avoid.
-function folderProviders(s, folder) {
-  const roots = [installContent(s), workshopContent(s)].filter(Boolean)
-  return getIniList(s, 'WorkshopItems').filter(id =>
-    roots.some(r => fs.existsSync(path.join(r, id, 'mods', folder))))
-}
-
-// The one place an excluded folder is removed from disk. Every path that installs mods and every
-// path that brings the container up calls this, so nothing can reintroduce a banned folder behind
-// the operator's back. Idempotent. Never edits the ini: an excluded folder is simply not there to
-// contribute a mod id, and dropping ids from Mods= is the one thing that loses items.
-function applyExcludes(s) {
-  const removed = []
-  for (const { workshopId, folder } of allExcludes(readExcludes(s))) {
-    if (!validWorkshopId(workshopId) || !validFolder(folder)) {
-      console.error('[excludes] ignoring malformed entry ' + workshopId + '/' + folder)
-      continue
-    }
-    // Computed before anything is deleted, or the item's own copy would count as a provider.
-    const others = folderProviders(s, folder).filter(id => id !== workshopId)
-    if (others.length) logFor(s, 'exclude ' + workshopId + '/' + folder + ': leaving ' + path.join(modsDir(s), folder) + ' alone, also shipped by [' + others.join(', ') + ']')
-
-    const itemRoots = [installContent(s), workshopContent(s)].filter(Boolean)
-    const targets = []
-    for (const t of removalTargets(workshopId, folder, others)) {
-      if (t.root === 'mods') targets.push(path.join(modsDir(s), ...t.parts))
-      else for (const r of itemRoots) targets.push(path.join(r, ...t.parts))
-    }
-
-    for (const target of targets) {
-      if (!fs.existsSync(target)) continue
-      try { fs.rmSync(target, { recursive: true, force: true }); removed.push(target) }
-      catch (e) { console.error('[excludes] could not remove ' + target + ': ' + e.message) }
-    }
-  }
-  if (removed.length) logFor(s, 'removed ' + removed.length + ' excluded mod folder(s): ' + removed.join(', '))
-  return removed
-}
-
-// Post-download bookkeeping for one Workshop item. Only registers the item in the server ini
-// if it actually produced loadable mod folders — registering empty/failed downloads is what
-// previously polluted WorkshopItems with entries the game can't load.
-// opts.force replaces what is already on disk instead of stepping around it. The default stays
-// non-destructive because an ordinary download runs while people are playing; the reinstall flow
-// runs with the container stopped and is the only caller that wants the old files gone.
-function registerInstalledMod(s, workshopId, opts) {
-  const force = !!(opts && opts.force)
-  const fromInstall = installContent(s) ? path.join(installContent(s), workshopId) : null
-  const itemDest = path.join(workshopContent(s), workshopId)
-
-  if (force && fromInstall && fs.existsSync(fromInstall)) {
-    // The whole point of a reinstall: the mirrored copy must end up identical to what SteamCMD
-    // just wrote, including folders the author has removed since the last download.
-    try {
-      fs.rmSync(itemDest, { recursive: true, force: true })
-      fs.cpSync(fromInstall, itemDest, { recursive: true })
-    } catch (e) { console.error('[install] force mirror failed for ' + workshopId + ':', e.message) }
-  } else {
-    try {
-      // `sh -c` with the id passed as $1 rather than spliced into the script: the id is validated
-      // digits at every entry point, and this keeps it that way even if one day it is not.
-      docker.execInSync(s.container, ['sh', '-c',
-        'cp -rn /home/steam/pz-dedicated/steamapps/workshop/content/108600/"$1" ' +
-        '/home/steam/Steam/steamapps/workshop/content/108600/ 2>/dev/null; true',
-        'sh', workshopId], { timeout: 30000 })
-    } catch (e) {
-      console.error('[install] mirror copy inside ' + s.container + ' failed for ' + workshopId + ': ' + e.message)
-    }
-  }
-
-  const dir = path.join(itemDest, 'mods')
-  const excludes = readExcludes(s)
-  const copiedFolders = []
-  if (fs.existsSync(dir)) {
-    for (const folder of fs.readdirSync(dir)) {
-      if (/^\d+\.\d+$/.test(folder)) continue
-      // Never copy a banned folder in the first place — applyExcludes() below would only have to
-      // delete it again, and between the two it would briefly be loadable.
-      if (isExcluded(excludes, workshopId, folder)) continue
-      const src = path.join(dir, folder)
-      const dest = path.join(modsDir(s), folder)
-      try {
-        // Only replace a folder no other installed item ships. <data>/mods is flat and shared, so
-        // forcing over a name two items happen to use would overwrite the other mod's files.
-        if (force && fs.existsSync(dest) && !folderProviders(s, folder).some(id => id !== workshopId)) {
-          fs.rmSync(dest, { recursive: true, force: true })
-        }
-        if (!fs.existsSync(dest)) { fs.cpSync(src, dest, { recursive: true }); copiedFolders.push(folder) }
-      } catch (e) {
-        // Was swallowed silently, which is the worst possible outcome here: the item then looks
-        // installed, gets written into Mods=, and the mod it names has no files to load from.
-        console.error('[install] could not copy mod folder "' + folder + '" for item ' + workshopId + ': ' + e.message)
-      }
-    }
-  }
-  // Clears the item's excluded folders out of the install/workshop trees too — the copy loop above
-  // only guards <data>/mods, and the game reads the install tree.
-  applyExcludes(s)
-
-  const newModIds = modIdsFromWorkshop(s, workshopId)
-  if (!newModIds.length) return { status: 'empty', modIds: [], copiedFolders }
-  setIniList(s, 'WorkshopItems', [...new Set([...getIniList(s, 'WorkshopItems'), workshopId])])
-  setIniList(s, 'Mods', [...new Set([...getIniList(s, 'Mods'), ...newModIds])])
-  return { status: 'installed', modIds: newModIds, copiedFolders }
-}
-
-// Kicks off a SteamCMD download and returns immediately — runs via a *detached* `docker exec -d`
-// inside the PZ server container, so the download survives a restart of this manager.
-// Completion is detected by reconcileDownloads() below, not by a callback on this process.
-function steamcmdDownload(s, workshopIds, source, collectionId) {
-  if (!workshopIds.length) return
-  queueAdd(s, workshopIds, source, collectionId)
-  const items = workshopIds.flatMap(id => ['+workshop_download_item', '108600', id])
-  const argv = ['/home/steam/steamcmd/steamcmd.sh', '+force_install_dir', '/home/steam/pz-dedicated',
-    '+login', 'anonymous', ...items, '+quit']
-  logFor(s, 'SteamCMD: downloading ' + workshopIds.length + ' item(s) [' + workshopIds.slice(0, 8).join(', ') + (workshopIds.length > 8 ? ', ...' : '') + '] source=' + source)
-  docker.execInDetached(s.container, argv, { timeout: 15000 }, (err, stdout, stderr) => {
-    if (err) {
-      console.error('[download] failed to start for ' + s.name + ':', stderr || err.message)
-      const queue = readQueue(s)
-      for (const e of queue) {
-        if (workshopIds.includes(e.id) && e.status === 'queued') {
-          e.status = 'failed'
-          e.error = 'Could not start SteamCMD in container "' + s.container + '": ' +
-            (stripAnsi(stderr || err.message).trim().slice(0, 300) || 'no output') +
-            '. Check the server container is running.'
-          e.updatedAt = new Date().toISOString()
-        }
-      }
-      writeQueue(s, queue)
-    }
-  })
-}
-
-// --- Download failure diagnosis ---
-//
-// Every failed download used to report the same sentence regardless of cause, which made a
-// resumable timeout, an out-of-disk and a not-actually-a-mod item indistinguishable. These
-// helpers turn SteamCMD's own output plus the state on disk into something actionable.
-function stripAnsi(str) { return String(str).replace(/\x1b\[[0-9;]*m/g, '') }
-
-
-
-// How much of an item SteamCMD has already pulled into the server's force_install_dir. That tree
-// is not mounted into this container, so ask the server container. A surviving partial is the
-// difference between "retry resumes" and "retry starts from zero".
-function partialBytes(s, workshopId) {
-  try {
-    const out = docker.execInSync(s.container, ['sh', '-c',
-      'du -sb /home/steam/pz-dedicated/steamapps/workshop/content/108600/"$1" 2>/dev/null || true',
-      'sh', workshopId], { timeout: 20000 }).trim()
-    return parseInt(out.split(/\s+/)[0], 10) || 0
-  } catch { return 0 }
-}
-
-// Explains why an item settled with no usable mod folders.
-function explainDownloadFailure(s, workshopId, logLines) {
-  // Last match wins — the most recent attempt is the one worth reporting.
-  let steamErr = null
-  const re = new RegExp('ERROR!.*\\b' + workshopId + '\\b.*')
-  for (const line of logLines || []) {
-    const m = stripAnsi(line).match(re)
-    if (m) steamErr = m[0].trim()
-  }
-  const partial = partialBytes(s, workshopId)
-  const free = disk.freeBytes(s.data)
-  const bits = []
-
-  bits.push(steamErr ? 'SteamCMD: "' + steamErr + '".' : 'SteamCMD produced no mod folders for this item.')
-  if (partial > 0) bits.push(humanBytes(partial) + ' is already downloaded — Retry resumes from there rather than starting over.')
-  if (/timeout/i.test(steamErr || '')) bits.push('SteamCMD times out on very large items; each retry picks up where the last stopped, so repeated retries do finish.')
-  if (free > 0 && free < 10 * 1024 * 1024 * 1024) {
-    bits.push('Only ' + humanBytes(free) + ' free on disk — note each mod is stored twice (workshop copy + server mods folder).')
-  }
-  if (!steamErr && !partial) {
-    bits.push('If this Workshop item is a save, map-only upload or otherwise contains no mod.info, it will never install as a mod.')
-  }
-  return bits.join(' ')
-}
-
-// Reconciles the persisted queue against reality on an interval.
-//
-// An item leaves "queued" only once it is no longer actively downloading AND we've confirmed
-// what actually landed on disk. Absence from the active-download log is NOT treated as success
-// on its own — that assumption previously marked never-downloaded mods as "installed" and wrote
-// them into servertest.ini. Items that produce no mod content are marked failed with a reason,
-// and nested collections are detected and expanded into their child items.
-const QUEUE_GRACE_MS = 90 * 1000
-function reconcileDownloads(s) {
-  // It writes Mods=/WorkshopItems= and copies into <data>/mods — both of which the reinstall's
-  // swap phase is rewriting from a snapshot. Whichever wrote last would win, silently.
-  if (reinstallHoldsContainer(s)) return
-  const queue = readQueue(s)
-  const pending = queue.filter(e => e.status === 'queued')
-  if (!pending.length) return
-  docker.logs(s.container, ['--tail', '1500'], { maxBuffer: 8 * docker.MB }, (err, out) => {
-    const activeIds = new Set(parseDownloads((out || '').split('\n')).map(a => a.workshopId))
-    const settled = []
-    for (const entry of pending) {
-      if (activeIds.has(entry.id)) continue
-      // Give a just-queued item time to actually appear in the log before judging it.
-      if (Date.now() - new Date(entry.queuedAt).getTime() < QUEUE_GRACE_MS) continue
-      settled.push(entry)
-    }
-    if (!settled.length) return
-
-    // Anything with no content might be a nested collection rather than a failed mod — ask Steam.
-    const empties = settled.filter(e => !hasModContent(s, e.id)).map(e => e.id)
-    steamCollectionDetails(empties, (cErr, collMap) => {
-      const nowIso = new Date().toISOString()
-      const expand = []
-      for (const entry of settled) {
-        const kids = collMap && collMap[entry.id]
-        if (kids && kids.length) {
-          entry.status = 'collection'
-          entry.error = null
-          entry.childCount = kids.length
-          entry.updatedAt = nowIso
-          // Pull the collection out of the mod list — it isn't a loadable mod — and queue its children.
-          setIniList(s, 'WorkshopItems', getIniList(s, 'WorkshopItems').filter(id => id !== entry.id))
-          expand.push({ parent: entry.id, kids })
-          continue
-        }
-        try {
-          const r = registerInstalledMod(s, entry.id)
-          if (r.status === 'installed') {
-            logFor(s, 'installed ' + entry.id + ' - mod ids [' + r.modIds.join(', ') + ']')
-            entry.status = 'installed'
-            entry.modIds = r.modIds
-            entry.copiedFolders = r.copiedFolders
-            entry.error = null
-          } else {
-            entry.status = 'failed'
-            entry.error = explainDownloadFailure(s, entry.id, (out || '').split('\n'))
-            logFor(s, 'download FAILED for ' + entry.id + ' - ' + entry.error)
-          }
-        } catch (e) {
-          entry.status = 'failed'
-          entry.error = e.message
-        }
-        entry.updatedAt = nowIso
-      }
-      writeQueue(s, queue)
-      for (const x of expand) {
-        const fresh = x.kids.filter(k => !getIniList(s, 'WorkshopItems').includes(k))
-        if (fresh.length) {
-          console.log('[collection] ' + x.parent + ' is a nested collection — queueing ' + fresh.length + ' child item(s)')
-          steamcmdDownload(s, fresh, 'collection', x.parent)
-        }
-      }
-    })
-  })
-}
 setInterval(() => { for (const s of allServers()) reconcileDownloads(s) }, 15000)
 
 // --- Mods list ---
@@ -1766,21 +1215,6 @@ app.post('/api/mods/drift/repair', (req, res) => {
 //
 // The download runs with the server still up, because SteamCMD lives inside the PZ container and
 // a stopped container cannot be exec'd into. Only steps 5-11 are downtime.
-const REINSTALL = {} // [serverId] = { workshopId, step, startedAt, finishedAt, ok, error, quarantine }
-const REINSTALL_QUARANTINE_KEEP = 3
-const REINSTALL_DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000
-
-function reinstallBusy(s) {
-  const r = REINSTALL[s.id]
-  return !!(r && !r.finishedAt)
-}
-// True only for the downtime window — from the stop to the start. Distinct from reinstallBusy()
-// because the download phase still needs reconcileDownloads() running to do its bookkeeping,
-// while the swap phase must have sole ownership of the ini and of <data>/mods.
-function reinstallHoldsContainer(s) {
-  const r = REINSTALL[s.id]
-  return !!(r && !r.finishedAt && r.holdsContainer)
-}
 
 // Promise wrappers, so the eleven-step reinstall below reads as a sequence rather than a callback
 // ladder. Errors are trimmed because they end up in `state.error`, which the UI renders verbatim.
@@ -1841,21 +1275,11 @@ function quarantinedFolders(quarantine) {
 }
 
 async function reinstallWorkshopItem(s, workshopId) {
-  /**
-   * Progress for the one reinstall this server may have in flight. Every field is declared here,
-   * including the ones only some outcomes set, because this object is what GET /api/mods/reinstall
-   * serves and the UI branches on which of them are present.
-   *
-   * @type {{
-   *   workshopId: string, step: string, startedAt: string, finishedAt: string|null,
-   *   ok: boolean, error: string|null, quarantine: string|null,
-   *   holdsContainer?: boolean, addedModIds?: string[], rolledBack?: boolean, strandedDown?: boolean
-   * }}
-   */
-  const state = REINSTALL[s.id] = {
+  // The state shape lives with the store, in src/services/reinstall-state.js.
+  const state = reinstallState.set(s, {
     workshopId, step: 'starting', startedAt: new Date().toISOString(),
     finishedAt: null, ok: false, error: null, quarantine: null,
-  }
+  })
   const step = (name) => { state.step = name; logFor(s, 'reinstall ' + workshopId + ': ' + name) }
 
   const install = installContent(s)
@@ -2037,7 +1461,7 @@ async function reinstallWorkshopItem(s, workshopId) {
 
 app.get('/api/mods/reinstall', (req, res) => {
   const s = srv(req)
-  res.json({ available: !!s.install, busy: reinstallBusy(s), state: REINSTALL[s.id] || null })
+  res.json({ available: !!s.install, busy: reinstallState.busy(s), state: reinstallState.get(s) })
 })
 
 app.post('/api/mods/:workshopId/reinstall', (req, res) => {
@@ -2045,7 +1469,7 @@ app.post('/api/mods/:workshopId/reinstall', (req, res) => {
   const { workshopId } = req.params
   if (!validWorkshopId(workshopId)) return res.status(400).json({ error: 'workshopId must be digits' })
   if (!s.install) return res.status(409).json({ error: 'This server has no /pz-install mount, so the manager cannot see the files the game loads. Add ./install:/pz-install to the mod-manager service and restart it.' })
-  if (reinstallBusy(s)) return res.status(409).json({ error: 'A reinstall of ' + REINSTALL[s.id].workshopId + ' is already running' })
+  if (reinstallState.busy(s)) return res.status(409).json({ error: 'A reinstall of ' + reinstallState.get(s).workshopId + ' is already running' })
   if (!getIniList(s, 'WorkshopItems').includes(workshopId)) return res.status(404).json({ error: 'Workshop item ' + workshopId + ' is not installed on this server' })
 
   // Answered immediately: the flow runs for as long as a download plus a restart, well past any
@@ -2542,7 +1966,7 @@ function runAutoUpdate(s, force) {
   if (!cfg.enabled && !force) return
   // The reinstall owns the container and the ini while it runs, and "Check now" is no exception:
   // a download queued underneath it would land in the middle of the file swap.
-  if (reinstallBusy(s)) return console.log('[autoupdate] ' + serverLabel(s) + ': skipped, a mod reinstall is in progress')
+  if (reinstallState.busy(s)) return console.log('[autoupdate] ' + serverLabel(s) + ': skipped, a mod reinstall is in progress')
 
   const finish = () => writeAutoUpdate(s, cfg)
 
