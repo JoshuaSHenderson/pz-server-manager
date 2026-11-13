@@ -47,13 +47,30 @@ function kindOf(file) {
 }
 
 /**
+ * Member names from `unzip -lq` output. The image ships busybox unzip, which has no `-Z1`; its
+ * `-l` table matches Info-ZIP's (length, MM-DD-YYYY, HH:MM, name), so this parses either. The
+ * header, separator and totals rows don't match the date pattern and drop out.
+ * @param {string} out
+ * @returns {string[]}
+ */
+function parseZipListing(out) {
+  const names = []
+  for (const line of String(out).split('\n')) {
+    const m = /^\s*\d+\s+\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}\s+(.+?)\r?$/.exec(line)
+    if (m) names.push(m[1])
+  }
+  return names
+}
+
+/**
  * Runs a command with an argument array — never a shell string.
  * @param {string} cmd
  * @param {string[]} args
  * @param {number} timeout
  * @param {(err: Error|null, stdout: string, stderr: string) => void} cb
+ * @param {number} [maxOut] stdout kept; a listing must keep all of it, or members go unchecked
  */
-function run(cmd, args, timeout, cb) {
+function run(cmd, args, timeout, cb, maxOut = 1_000_000) {
   let out = ''
   let err = ''
   let done = false
@@ -63,7 +80,7 @@ function run(cmd, args, timeout, cb) {
     cb(e, out, err)
   }
   const child = spawn(cmd, args, { timeout })
-  child.stdout.on('data', d => { if (out.length < 1_000_000) out += d.toString() })
+  child.stdout.on('data', d => { if (out.length < maxOut) out += d.toString() })
   child.stderr.on('data', d => { if (err.length < 100_000) err += d.toString() })
   child.on('error', finish)
   child.on('close', code => finish(code === 0 ? null : new Error(cmd + ' exited with code ' + code)))
@@ -76,17 +93,16 @@ function run(cmd, args, timeout, cb) {
  */
 function listMembers(file, cb) {
   if (kindOf(file) === 'tar.gz') {
-    return run('tar', ['-tzf', file], 30000, (e, out, errOut) => {
+    return run('tar', ['-tzf', file], 120000, (e, out, errOut) => {
       if (e) return cb(e, [], errOut)
       cb(null, out.split('\n').map(l => l.trim()).filter(Boolean), out)
-    })
+    }, Infinity)
   }
-  // `unzip -Z1` prints one member name per line and nothing else. Plain `-l` wraps the names in a
-  // table that has to be re-parsed, and busybox's table format is not the same as Info-ZIP's.
-  run('unzip', ['-Z1', file], 30000, (e, out, errOut) => {
+  // A real world save is ~520k members (~40 MB of listing), hence no stdout cap.
+  run('unzip', ['-lq', file], 120000, (e, out, errOut) => {
     if (e) return cb(e, [], errOut)
-    cb(null, out.split('\n').map(l => l.trim()).filter(Boolean), out)
-  })
+    cb(null, parseZipListing(out), out)
+  }, Infinity)
 }
 
 /**
@@ -114,7 +130,7 @@ function extractInto(file, destDir, cb) {
     const dest = destDir.endsWith(path.sep) || destDir.endsWith('/') ? destDir : destDir + '/'
     const tar = kindOf(file) === 'tar.gz'
     const cmd = tar ? 'tar' : 'unzip'
-    const args = tar ? ['-xzf', file, '-C', dest] : ['-o', file, '-d', dest]
+    const args = tar ? ['-xzf', file, '-C', dest] : ['-oq', file, '-d', dest]
     run(cmd, args, 300000, (e, _out, errOut) => {
       if (e) return cb(new Error(e.message + (errOut ? ': ' + errOut.trim().slice(0, 500) : '')))
       cb(null, { members: names.length })
@@ -122,4 +138,4 @@ function extractInto(file, destDir, cb) {
   })
 }
 
-module.exports = { unsafeMembers, listMembers, extractInto, kindOf, MAX_UPLOAD_BYTES }
+module.exports = { unsafeMembers, listMembers, extractInto, kindOf, parseZipListing, MAX_UPLOAD_BYTES }
