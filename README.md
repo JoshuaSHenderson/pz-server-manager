@@ -176,6 +176,8 @@ services:
       - ./install:/pz-install
     environment:
       - TZ=America/New_York
+      # Omit to have one generated on first run and printed to this container's log.
+      - MANAGER_TOKEN=pick-something-long
     restart: unless-stopped
     depends_on:
       - zomboid
@@ -193,11 +195,37 @@ docker compose build mod-manager
 docker compose up -d mod-manager
 ```
 
-Open `http://<server-ip>:7777`.
+Open `http://<server-ip>:7777` and sign in with the manager token — see below.
+
+## Signing in
+
+The manager is behind a single shared token. Pin it with `MANAGER_TOKEN` in docker-compose:
+
+```yaml
+    environment:
+      - TZ=America/New_York
+      - MANAGER_TOKEN=pick-something-long
+```
+
+Leave it unset and one is generated on first run, persisted to `/pz-data/manager-token`, and
+printed to the manager's log:
+
+```bash
+docker logs pz-mod-manager | grep 'manager token'
+```
+
+Scripts can present it as a header instead of signing in:
+
+```bash
+curl -H "X-Manager-Token: $TOKEN" http://<server-ip>:7777/api/status
+```
 
 ## Notifications
 
-Configure Pushover credentials in the **Settings** tab of the UI. Credentials are stored in `/pz-data/notifications.json` (your data volume) — they are never baked into the image.
+Configure Pushover in the **Settings** tab. Credentials are stored in
+`/pz-data/notifications.json` (your data volume) and are never baked into the image or sent back
+to the browser — the UI only shows whether each one is set. `PUSHOVER_TOKEN` and
+`PUSHOVER_USER_KEY` can seed them from the environment instead.
 
 Get a Pushover account and app token at [pushover.net](https://pushover.net).
 
@@ -205,30 +233,72 @@ Get a Pushover account and app token at [pushover.net](https://pushover.net).
 
 ```
 mod-manager/
-  Dockerfile
-  package.json
-  server.js        # Express API + background monitors
-  public/
-    index.html     # Single-page UI (vanilla JS, no build step)
+  Dockerfile           two stages: build the UI, then a runtime image with prod deps only
+  server.js            wiring only — middleware, the router mount list, and listen
 
-  # Decision logic, kept pure and unit-tested — the filesystem and docker work stays in server.js
-  autoupdate.js    # what is out of date, and whether a restart is allowed yet
-  deps.js          # require= / incompatible= / loadModAfter= analysis
-  excludes.js      # mod folders that must never reach the server
-  moddrift.js      # enabled mods no client can download, and the rename that fixes them
-  modload.js       # enabled mods the boot log shows never loaded
-  order.js         # load-order validation (a save must be a pure permutation)
-  players.js       # player log replay
-  prune.js         # mods dropped from their collection
-  ready.js         # when a restart has actually produced a joinable server
-  save.js          # writing the world before the container goes down
+  src/
+    auth.js            one shared token; header for scripts, session cookie for the browser
+    http.js            query/header coercion, the error handler, process guards
+    log.js             the operator-visible activity log
+    startup.js         one-time per-server fixes applied at boot
+    paths.js           every path this manager reads or writes, for one server
+    registry/
+      servers.js       which servers exist, what they are called, which one a request is about
+    routes/            one router per subject; may use services and domain, never child_process
+    services/          the stateful work: downloads, reinstall, notifications, monitors' bodies
+    domain/            what a mod.info means, what Mods= means, what a sandbox file means
+      ini.js           reading and writing servertest.ini
+      modinfo.js       which id the game will actually register
+      inventory.js     the three trees PZ scans, and which of them a client can download from
+      sandbox.js       the SandboxVars.lua parser (pure, tested)
+    infra/             the only files that touch the outside world
+      docker.js        every docker command, as argument arrays — no shell anywhere
+      db.js            the whitelist, via the sqlite3 CLI
+      steam.js         the Workshop web API and its cache
+      rcon.js          the Source RCON wire protocol
+      disk.js, net.js  free space, directory sizes, external IP
+    monitors/          all eleven background monitors, started once, guarded against re-entry
 
-  test_*.js        # run with `node test_<name>.js` — no framework
+  web/                 the UI: Vite + React + TypeScript
+    index.html
+    src/
+      main.tsx
+      App.tsx          the shell: sidebar, server picker, which tab is mounted
+      api/             the fetch wrapper, the polling hooks, and the response types
+      components/      Card, the small shared pieces, the login form
+      features/        one directory per tab
+      styles/          the CSS, unchanged, split by subject
+
+  lib/                 pure decision logic — no I/O at all, and the best-tested code here
+    autoupdate.js      what is out of date, and whether a restart is allowed yet
+    deps.js            require= / incompatible= / loadModAfter= analysis
+    excludes.js        mod folders that must never reach the server
+    moddrift.js        enabled mods no client can download, and the rename that fixes them
+    modload.js         enabled mods the boot log shows never loaded
+    order.js           load-order validation (a save must be a pure permutation)
+    players.js         player log replay
+    prune.js           mods dropped from their collection
+    ready.js           when a restart has actually produced a joinable server
+    save.js            writing the world before the container goes down
+    *.test.js          run with `npm test`
 ```
+
+## Development
+
+```bash
+npm install
+npm run check     # type-check both halves, then run every test suite
+npm test          # the suites on their own
+npm run build     # build the UI into dist/, which the server serves
+npm run dev       # Vite on :5173, proxying /api to MANAGER_URL (default localhost:7778)
+```
+
+The backend is JavaScript with JSDoc types, checked by `tsc --noEmit` — there is no build step for
+it, and the container runs `node server.js` directly. The UI is TypeScript and is built.
 
 ## Notes
 
-- The PZ server container must be named `zomboid` (or update `server.js`)
+- PZ containers are auto-detected by image; the **Settings** tab renames, hides and forgets them
 - Server config expected at `/pz-data/Server/servertest.ini`
 - Whitelist DB at `/pz-data/db/servertest.db` (SQLite)
 - Player event logs at `/pz-data/Logs/*_user.txt` (PZ B41 format)

@@ -1,0 +1,91 @@
+/* Buttons, inputs, selects and toggle switches. */
+
+/* ============ BUTTONS ============ */
+button {
+  padding: .55rem 1.15rem;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font-family: var(--font-body);
+  font-size: .84rem; cursor: pointer; font-weight: 600;
+  letter-spacing: .01em;
+  transition: all .2s;
+  display: inline-flex; align-items: center; gap: .45rem;
+}
+button:hover { transform: translateY(-1px) }
+button:active { transform: translateY(0) }
+button:disabled { opacity: .35; cursor: not-allowed; transform: none }
+.btn-primary {
+  background: linear-gradient(135deg, #f43f5e, #c2274a);
+  color: #fff;
+  box-shadow: 0 4px 18px rgba(244,63,94,.3), inset 0 1px 0 rgba(255,255,255,.2);
+}
+.btn-primary:hover { box-shadow: 0 6px 24px rgba(244,63,94,.45), inset 0 1px 0 rgba(255,255,255,.2) }
+.btn-secondary { background: var(--bg3); color: #a5b4fc; border-color: var(--border) }
+.btn-secondary:hover { border-color: var(--border-strong); background: rgba(255,255,255,.08) }
+.btn-success { background: rgba(74,222,128,.1); color: var(--success); border-color: rgba(74,222,128,.35) }
+.btn-success:hover { background: rgba(74,222,128,.18); box-shadow: 0 0 18px rgba(74,222,128,.18) }
+.btn-danger { background: rgba(248,113,113,.1); color: var(--danger); border-color: rgba(248,113,113,.35) }
+.btn-danger:hover { background: rgba(248,113,113,.18); box-shadow: 0 0 18px rgba(248,113,113,.18) }
+.btn-warn { background: rgba(251,191,36,.1); color: var(--warn); border-color: rgba(251,191,36,.35) }
+.btn-warn:hover { background: rgba(251,191,36,.18); box-shadow: 0 0 18px rgba(251,191,36,.15) }
+.btn-sm { font-size: .76rem; padding: .32rem .7rem; border-radius: 7px }
+
+/* ============ INPUTS ============ */
+input, select, textarea {
+  padding: .55rem .85rem;
+  background: rgba(0,0,0,.35);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: .85rem;
+  transition: border-color .2s, box-shadow .2s, background .2s;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: rgba(244,63,94,.55);
+  box-shadow: 0 0 0 3px rgba(244,63,94,.14);
+  background: rgba(0,0,0,.5);
+}
+input::placeholder, textarea::placeholder { color: rgba(139,144,179,.55) }
+select option { background: #12131f }
+input[type=file] { padding: .5rem; font-size: .8rem; color: var(--muted) }
+input[type=file]::file-selector-button {
+  padding: .35rem .8rem; margin-right: .75rem;
+  background: var(--bg3); color: #a5b4fc;
+  border: 1px solid var(--border); border-radius: 7px;
+  font-size: .78rem; font-weight: 600; cursor: pointer;
+  transition: all .2s; font-family: var(--font-body);
+}
+input[type=file]::file-selector-button:hover { border-color: var(--border-strong) }
+
+/* toggle switches */
+input[type=checkbox] {
+  appearance: none; -webkit-appearance: none;
+  width: 38px; height: 21px; flex-shrink: 0;
+  border-radius: 999px;
+  background: rgba(255,255,255,.09);
+  border: 1px solid var(--border);
+  position: relative; cursor: pointer;
+  transition: all .25s;
+  padding: 0;
+}
+input[type=checkbox]::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 15px; height: 15px; border-radius: 50%;
+  background: #9298bd;
+  transition: all .25s cubic-bezier(.22,1,.36,1);
+}
+input[type=checkbox]:checked {
+  background: linear-gradient(135deg, #f43f5e, #c2274a);
+  border-color: rgba(244,63,94,.6);
+  box-shadow: 0 0 12px rgba(244,63,94,.3);
+}
+input[type=checkbox]:checked::after { left: 18px; background: #fff }
+input[type=checkbox]:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(244,63,94,.2) }
+
+/* override for small inline checkboxes in disk threshold row */
+input[type=number] { appearance: auto }
+
+.row { display: flex; gap: .6rem; align-items: center }
+.row input, .row select { flex: 1 }

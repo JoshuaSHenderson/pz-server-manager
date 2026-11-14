@@ -1,0 +1,65 @@
+/* Design tokens, the reset, and the page's layered background.
+   Extracted verbatim from the single-file UI; nothing here changed. */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0 }
+:root {
+  color-scheme: dark; /* native selects, scrollbars, and option highlights render dark */
+  --bg: #07070f;
+  --bg2: rgba(255,255,255,.028);
+  --bg3: rgba(255,255,255,.05);
+  --border: rgba(148,163,255,.14);
+  --border-strong: rgba(148,163,255,.28);
+  --accent: #f43f5e;
+  --accent-glow: rgba(244,63,94,.35);
+  --accent2: #5eead4;
+  --blue: #60a5fa;
+  --text: #e7e9f4;
+  --muted: #8b90b3;
+  --success: #4ade80;
+  --danger: #f87171;
+  --warn: #fbbf24;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-display: 'Rajdhani', 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  --sidebar-w: 248px;
+  --radius: 14px;
+}
+
+html { scrollbar-color: rgba(148,163,255,.25) transparent }
+body {
+  font-family: var(--font-body);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+body::before {
+  content: '';
+  position: fixed; inset: 0; z-index: -2;
+  background:
+    radial-gradient(ellipse 900px 600px at 85% -10%, rgba(244,63,94,.10), transparent 60%),
+    radial-gradient(ellipse 800px 700px at -10% 30%, rgba(94,234,212,.05), transparent 55%),
+    radial-gradient(ellipse 700px 500px at 60% 110%, rgba(96,165,250,.07), transparent 60%),
+    var(--bg);
+}
+body::after {
+  content: '';
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(148,163,255,.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148,163,255,.035) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse at 50% 0%, #000 0%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse at 50% 0%, #000 0%, transparent 75%);
+}
+
+a { color: var(--blue); text-decoration: none; transition: color .2s }
+a:hover { color: #93c5fd; text-decoration: underline }
+
+::-webkit-scrollbar { width: 10px; height: 10px }
+::-webkit-scrollbar-track { background: transparent }
+::-webkit-scrollbar-thumb { background: rgba(148,163,255,.18); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box }
+::-webkit-scrollbar-thumb:hover { background: rgba(148,163,255,.35); border: 2px solid transparent; background-clip: padding-box }
+::selection { background: rgba(244,63,94,.35); color: #fff }
